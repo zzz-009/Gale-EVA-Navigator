@@ -4,10 +4,15 @@ import type { Site } from './mapController';
 
 type TargetWorld = { grid: Grid; slope: Float32Array; region: { slope_max_deg: number }; hazards: GeoJSON.FeatureCollection; targets: Site[] };
 
-function inRing(p: LatLon, ring: GeoJSON.Position[]): boolean {
+function inRing(p: LatLon, ring: GeoJSON.Position[], includeBoundary = true): boolean {
   let inside = false;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
     const a = ring[i], b = ring[j];
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const epsilon = 1e-12;
+    if (Math.abs((p.lon - a[0]) * dy - (p.lat - a[1]) * dx) <= epsilon * Math.max(epsilon, Math.hypot(dx, dy)) &&
+        p.lon >= Math.min(a[0], b[0]) - epsilon && p.lon <= Math.max(a[0], b[0]) + epsilon &&
+        p.lat >= Math.min(a[1], b[1]) - epsilon && p.lat <= Math.max(a[1], b[1]) + epsilon) return includeBoundary;
     if ((a[1] > p.lat) !== (b[1] > p.lat) && p.lon < (b[0] - a[0]) * (p.lat - a[1]) / (b[1] - a[1]) + a[0]) inside = !inside;
   }
   return inside;
@@ -22,7 +27,7 @@ export function snapTarget(world: TargetWorld, point: LatLon): LatLon | null {
     return !world.hazards.features.some((f) => {
       if (f.properties?.level !== 'no_go') return false;
       const polygons = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.type === 'MultiPolygon' ? f.geometry.coordinates : [];
-      return polygons.some((rings) => inRing(p, rings[0]) && !rings.slice(1).some((ring) => inRing(p, ring)));
+      return polygons.some((rings) => inRing(p, rings[0]) && !rings.slice(1).some((ring) => inRing(p, ring, false)));
     });
   };
   const cell = latLonToCell(grid, point);

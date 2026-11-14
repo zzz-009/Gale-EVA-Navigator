@@ -15,9 +15,6 @@ export type RegionMeta = { north: number; south: number; west: number; east: num
 export const ROUTE_COLOR: Record<RoutePreset, string> = { safe: '#ff4fd8', short: '#4cc9f0', science: '#afa9ec' };
 export const SLOPE_COLOR = ['#5dcaa5', '#fac775', '#ef7f62', '#e24b4a'];
 
-// L.circle は半径を地球の半径で計算するので、火星の半径に合わせて補正する。
-const circleRadius = (m: number): number => m * (6371000 / MARS_GALE.radius_m);
-
 const dot = (color: string, size = 14, ring = '#0b1418'): L.DivIcon =>
   L.divIcon({
     className: '',

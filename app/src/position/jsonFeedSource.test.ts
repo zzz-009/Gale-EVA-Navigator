@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { JsonFeedSource, parsePositionFeed } from './jsonFeedSource';
 import type { PositionFix } from './source';
 
@@ -6,6 +6,28 @@ import type { PositionFix } from './source';
 const region = { north: 1, south: -1, west: -1, east: 1 };
 const raw = (hiddenLon = 0.002) => ({ format: 'gale-eva-positions/1', positions: [0, 10, 20, 40].map((s, i) => ({ t_utc: new Date(Date.UTC(2026, 10, 14) + s * 1000).toISOString(), lat: 0, lon: i === 2 ? hiddenLon : i * 0.001, accuracy_m: 5 })) });
 describe('JSONの位置取得', () => {
+  it('共通の再生速度を変更するとJSONの受信時刻も加速し、停止でタイマーを解除する', () => {
+    vi.useFakeTimers();
+    let now = 0;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const feed = raw();
+    feed.positions.forEach((p, i) => { p.t_utc = new Date(Date.UTC(2026, 10, 14) + i * 30000).toISOString(); });
+    const source = new JsonFeedSource(parsePositionFeed(feed, region), { lat: 0, lon: 0 }, () => {});
+    const fixes: PositionFix[] = [];
+    try {
+      source.setSpeed(1); source.start((fix) => fixes.push(fix));
+      now = 10000; vi.advanceTimersByTime(100);
+      expect(fixes).toHaveLength(1);
+      source.setSpeed(3);
+      now = 14000; vi.advanceTimersByTime(100);
+      expect(fixes).toHaveLength(1);
+      source.setSpeed(8);
+      now = 15000; vi.advanceTimersByTime(100);
+      expect(fixes).toHaveLength(2);
+      expect(fixes[1].t_utc).toBe(feed.positions[1].t_utc);
+      source.stop(); expect(vi.getTimerCount()).toBe(0);
+    } finally { source.stop(); clock.mockRestore(); vi.useRealTimers(); }
+  });
   it('形式・地域外・時刻の重複・数値以外を拒否する', () => {
     expect(() => parsePositionFeed({ ...raw(), format: 'wrong' }, region)).toThrow('format');
     expect(() => parsePositionFeed(raw(2), region)).toThrow('活動地域');

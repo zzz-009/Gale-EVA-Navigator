@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   buildTracBack,
-  cellLatLon,
-  computeSlopeAspect,
   countUnsent,
   DEFAULT_V0,
   deviationFromRoute,
@@ -22,8 +20,6 @@ import {
   RISK_BANDS,
   slopeClass,
   trackStats,
-  type Grid,
-  type Landmark,
   type LatLon,
   type Route,
   type RoutePreset,
@@ -34,7 +30,7 @@ import { densify, stamp } from './sim';
 import { clearSession, loadSession, saveSession } from './store';
 import { renderRiskHeat } from './heatmap';
 import { MiniMap } from './miniMap';
-import type { HazardSettings } from './hazardText';
+import { loadWorld, type World } from './world';
 import { RiskHelp } from './RiskHelp';
 import { DustPanel, dustWarning } from './DustPanel';
 import type { BaseMapMode } from './baseMap';
@@ -47,20 +43,12 @@ import { HudView } from './HudView';
 import { useFieldDevices } from './useFieldDevices';
 import { fieldPosition, fieldWarning, type HudState } from './fieldState';
 import { simulateHealth } from './health';
+import { useBaseDeviceChannel } from './deviceChannel';
+import { DeviceLinks } from './DeviceView';
 
 type Mode = 'plan' | 'traverse' | 'lost' | 'tracback';
 type ViewScope = 'plan' | 'field';
-type World = {
-  grid: Grid;
-  slope: Float32Array;
-  aspect: Float32Array;
-  region: HazardSettings & { north: number; south: number; west: number; east: number; source: { credit: string; product: string; note: string } };
-  contours: GeoJSON.FeatureCollection;
-  hazards: GeoJSON.FeatureCollection;
-  base: Site;
-  targets: Site[];
-  landmarks: Landmark[];
-};
+
 
 const PRESETS: RoutePreset[] = ['safe', 'short'];
 const PRESET_LABEL: Record<RoutePreset, string> = { safe: '安全優先ルート', short: '最短時間ルート', science: '科学探査ルート' };
@@ -84,63 +72,6 @@ const fmtDur = (s: number): string => {
 };
 const fmtLatLon = (p: LatLon): string => `${Math.abs(p.lat).toFixed(4)}°${p.lat < 0 ? 'S' : 'N'}, ${p.lon.toFixed(4)}°E`;
 
-/** (c, r) の近くで、傾斜が緩いマスを探す。 */
-function freeCell(grid: Grid, slope: Float32Array, c: number, r: number): { c: number; r: number } {
-  for (let rad = 0; rad < 40; rad++) {
-    for (let dr = -rad; dr <= rad; dr++) {
-      for (let dc = -rad; dc <= rad; dc++) {
-        const cc = c + dc;
-        const rr = r + dr;
-        if (cc < 0 || rr < 0 || cc >= grid.width || rr >= grid.height) continue;
-        if (slope[idx(grid, cc, rr)] < 8) return { c: cc, r: rr };
-      }
-    }
-  }
-  return { c, r };
-}
-
-async function loadWorld(): Promise<World> {
-  const get = async (name: string): Promise<Response> => {
-    const res = await fetch(`/data/${name}`);
-    if (!res.ok) throw new Error(`${name} を読み込めませんでした（${res.status}）`);
-    return res;
-  };
-  const [region, elevBuf, roughBuf, contours, hazards] = await Promise.all([
-    get('region.json').then((r) => r.json()),
-    get('elev.f32').then((r) => r.arrayBuffer()),
-    get('rough.f32').then((r) => r.arrayBuffer()),
-    get('contours.geojson').then((r) => r.json()),
-    get('hazard_zones.geojson').then((r) => r.json()),
-  ]);
-  const grid: Grid = { ...region, elev: new Float32Array(elevBuf), rough: new Float32Array(roughBuf) };
-  const { slope, aspect } = computeSlopeAspect(grid);
-
-  const site = (id: string, name: string, c: number, r: number, note?: string): Site => {
-    const f = freeCell(grid, slope, c, r);
-    return { id, name, ...cellLatLon(grid, f.c, f.r), note };
-  };
-  const base = site('base', '基地', 70, 80);
-  // 目的地は、ルートの差が出る場所を実際に計算して選んだ
-  const targets = [
-    site('T1', '目標A（東の露頭）', 546, 220, '崖の縁にむき出しになった地層を調べる'),
-    site('T2', '目標B（尾根の先）', 380, 300, '尾根の先の岩石を採取する'),
-    site('T3', '目標C（崖の南）', 540, 460, '崖の下の堆積物を調べる（崖を越える必要がある）'),
-  ];
-
-  // 目印: 大きい急斜面のエリアの中心（公式の地名ではないので、仮の名前）
-  const big = (hazards as GeoJSON.FeatureCollection).features
-    .filter((f) => f.properties?.level === 'no_go')
-    .sort((a, b) => (b.properties?.area_m2 ?? 0) - (a.properties?.area_m2 ?? 0))
-    .slice(0, 6);
-  const landmarks: Landmark[] = big.map((f, i) => {
-    const ring = (f.geometry as GeoJSON.Polygon).coordinates[0];
-    const lon = ring.reduce((s, p) => s + p[0], 0) / ring.length;
-    const lat = ring.reduce((s, p) => s + p[1], 0) / ring.length;
-    return { id: `L${i}`, name: `目印${'ABCDEF'[i]}`, lat, lon, kind: '急な崖' };
-  });
-
-  return { grid, slope, aspect, region, contours, hazards, base, targets, landmarks };
-}
 
 export function App() {
   const devices = useFieldDevices();
@@ -539,13 +470,16 @@ export function App() {
     setBackIdx(0);
   };
 
-  if (loadError) return <div className="fatal">データを読み込めませんでした。{loadError}</div>;
-
   const currentMs = startMs.current + (stats.elapsed_s + backElapsed) * 1000;
   const clock = world ? stamp(currentMs, world.base.lon) : null;
   const weatherWarning = forecast ? dustWarning(forecast) : null;
   const hudState: HudState = { ...field, health, healthOn: devices.healthOn, overviewOn: !miniCollapsed, online, source: backPos ? 'dead_reckoning' : positionFeed.fix?.source ?? 'simulation', destination,
     warning: fieldWarning(destination?.offRoute ?? false, weatherWarning, limit, health), baseMapMode, route, track, targets };
+  const channelError = useBaseDeviceChannel(world ? { ...hudState, hudOn: devices.hudOn, mode, canLost: mode === 'traverse' && track.length >= 3, canReturn: mode === 'lost' && !!lost && !!pos } : null, {
+    hud: devices.setHudOn, health: devices.setHealthOn, overview: (on) => setMiniOpen((s) => ({ ...s, [scope]: on })),
+    lost: () => { setPlaying(false); setMode('lost'); }, return: startTracBack,
+  });
+  if (loadError) return <div className="fatal">データを読み込めませんでした。{loadError}</div>;
   const sciCount = route && world ? targets.filter((t) => deviationFromRoute(t, route.coords) < 150).length : 0;
 
   const kpis: { label: string; value: string; sub: string }[] =
@@ -559,14 +493,14 @@ export function App() {
       : [
           { label: '歩いた距離', value: fmtKm(stats.surface_m), sub: `登り +${Math.round(stats.ascent_m)} m / 下り −${Math.round(stats.descent_m)} m` },
           { label: '経過時間', value: fmtDur(stats.elapsed_s + backElapsed), sub: 'シミュレーション' },
-          { label: '位置の誤差', value: pos ? `±${Math.round(pos.err_m)} m` : '–', sub: '推測航法: 進んだ距離の 3%' },
+          { label: '位置の誤差', value: pos ? `±${Math.round(pos.err_m)} m` : '–', sub: online && positionFeed.fix?.source === 'satellite' ? '衛星測位（仮定）' : '推測航法: 進んだ距離の 3%' },
           { label: '酸素の残り（シミュレーション）', value: fmtDur(o2 * 60), sub: `バッテリー ${Math.round((battery / BATTERY_START_MIN) * 100)}%（シミュレーション）` },
         ];
 
   return (
     <>
-    {devices.hudOn && world ? <HudView world={world} state={hudState} onClose={() => devices.setHudOn(false)} onHealthToggle={() => devices.setHealthOn((on) => !on)} onOverviewToggle={() => setMiniOpen((s) => ({ ...s, [scope]: !s[scope] }))} /> : null}
-    <div className={`app ${devices.hudOn ? 'dashboard-hidden' : ''}`}>
+    {devices.localHudVisible && world ? <HudView world={world} state={hudState} onClose={devices.closeLocalHud} onHealthToggle={() => devices.setHealthOn((on) => !on)} onOverviewToggle={() => setMiniOpen((s) => ({ ...s, [scope]: !s[scope] }))} /> : null}
+    <div className={`app ${devices.localHudVisible ? 'dashboard-hidden' : ''}`}>
       <header className="hdr">
         <div className="brand">
           <span className="planet" aria-hidden="true" />
@@ -619,7 +553,7 @@ export function App() {
             </div>
             {!world ? <div className="loading">地形データを読み込んでいます…</div> : null}
             <div className="layerbar">
-              <button className="tog" onClick={() => devices.setHudOn(true)} disabled={!world}>HUD 表示</button>
+              <button className="tog" onClick={devices.openLocalHud} disabled={!world}>HUD 表示</button>
               <button className={`tog ${devices.healthOn ? 'on' : ''}`} aria-pressed={devices.healthOn} onClick={() => devices.setHealthOn((on) => !on)}>健康状態 {devices.healthOn ? 'ON' : 'OFF'}</button>
               <div className="basemap-switch" role="group" aria-label="地図の背景">
                 <button type="button" className={`tog ${baseMapMode === 'mono' ? 'on' : ''}`} aria-pressed={baseMapMode === 'mono'} onClick={() => setBaseMapMode('mono')}>白黒（詳細）</button>
@@ -672,6 +606,8 @@ export function App() {
         </section>
 
         <aside className="side">
+          <DeviceLinks onHudOpen={() => devices.setHudOn(true)} />
+          {channelError ? <p role="alert">{channelError}</p> : null}
           <DestinationStatus info={destination} />
           <PositionControls feed={positionFeed} planning={mode === 'plan'} online={online} />
           {notice ? <div className="note ok">{notice}</div> : null}
@@ -722,6 +658,12 @@ export function App() {
                     ))}
                     <p className="muted small">計算結果からテンプレートで作った文章です（生成 AI は使っていません）。</p>
                   </div>
+                  <label className="inline">再生速度（シミュレーション）
+                    <select value={speed} onChange={(e) => setSpeed(Number(e.target.value))}>
+                      <option value={1}>×1</option><option value={3}>×3</option><option value={8}>×8</option>
+                    </select>
+                  </label>
+                  {positionFeed.kind === 'json' ? <p className="muted small">JSONの時刻間隔もこの速度で再生します（30秒間隔なら×8で約3.75秒ごと）。</p> : null}
                   <button className="primary" onClick={depart}>
                     このルートで出発（シミュレーション）
                   </button>

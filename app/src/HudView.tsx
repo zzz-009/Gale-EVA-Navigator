@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { DestinationStatus } from './DestinationStatus';
 import { positionLabel } from './position/source';
 import { HudMap } from './hudMap';
@@ -11,10 +11,20 @@ export function HudView({ world, state, onClose, onHealthToggle, onOverviewToggl
   const rotor = useRef<HTMLDivElement>(null);
   const controller = useRef<HudMap | null>(null);
   const angle = useRef(0);
+  const [mapError, setMapError] = useState(false);
   useEffect(() => {
     if (!mapEl.current) return;
-    const map = new HudMap(mapEl.current, world); controller.current = map;
-    return () => { controller.current = null; map.destroy(); };
+    const el = mapEl.current;
+    try {
+      const map = new HudMap(el, world); controller.current = map;
+      setMapError(false);
+      return () => { controller.current = null; map.destroy(); };
+    } catch (error) {
+      controller.current = null;
+      delete (el as HTMLDivElement & { _leaflet_id?: number })._leaflet_id;
+      setMapError(true);
+      console.error('HUD map initialization failed', error);
+    }
   }, [world]);
   useEffect(() => {
     const delta = ((state.heading - angle.current + 540) % 360 + 360) % 360 - 180;
@@ -26,6 +36,7 @@ export function HudView({ world, state, onClose, onHealthToggle, onOverviewToggl
   useEffect(() => { controller.current?.setTrack(state.track); }, [world, state.track]);
   useEffect(() => { controller.current?.setBaseMap(state.baseMapMode); }, [world, state.baseMapMode]);
   return <section className="hud" aria-label="ヘルメット表示">
+    {mapError ? <p role="alert">HUDの地図を読み込めませんでした。基地の画面へ戻って再度開いてください。</p> : null}
     <div className="hud-viewport"><div className="hud-map-window"><div ref={rotor} className="hud-rotor"><div ref={mapEl} className="hud-map" /></div></div></div>
     <div className="hud-top"><DestinationStatus info={state.destination} /><div className="hud-actions">{onHealthToggle ? <button aria-pressed={state.healthOn} onClick={onHealthToggle}>健康状態 {state.healthOn ? 'OFFにする' : 'ONにする'}</button> : null}{onOverviewToggle ? <button aria-pressed={state.overviewOn} onClick={onOverviewToggle}>全体図を{state.overviewOn ? '隠す' : '表示'}</button> : null}{onClose ? <button onClick={onClose}>基地の画面へ戻る</button> : null}</div></div>
     {state.overviewOn ? <OverviewMap world={world} state={state} /> : null}

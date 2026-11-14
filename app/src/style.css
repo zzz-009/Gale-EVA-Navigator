@@ -36,6 +36,16 @@ button, select { font: inherit; color: inherit; }
 .health-status dd { margin: 0; font-variant-numeric: tabular-nums; }
 .health-status small { display: block; font-size: 10px; }
 .hud-overview { position: absolute; top: 200px; right: 12px; width: 200px; height: 200px; border: 1px solid #5dcaa5; border-radius: 8px; background: #000; pointer-events: none; }
+.device-links { display: flex; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+.device-links a { color: #a3dfef; border: 1px solid var(--border); border-radius: 6px; padding: 6px; }
+.device-links small { width: 100%; color: var(--muted); }
+.wrist { width: 360px; max-width: 100%; margin: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+.wrist h1 { margin: 0; font-size: 22px; }
+.wrist button, .device-wait button { min-height: 58px; font-size: 20px; padding: 12px; border: 1px solid #5dcaa5; border-radius: 12px; background: #0f2a24; color: #daffe8; cursor: pointer; }
+.wrist button:disabled, .device-wait button:disabled { opacity: .4; cursor: default; }
+.wrist .wrist-danger { background: #3a1616; border-color: #e24b4a; }
+.device-wait { padding: 32px; }
+.device-connection { position: fixed; top: 0; left: 0; right: 0; padding: 8px; z-index: 1600; background: #3a1616; color: #ffc9c9; font-size: 13px; }
 @media (max-height: 700px), (max-width: 600px) {
   .hud { font-size: 13px; }
   .hud .destination-status strong { font-size: 25px; }

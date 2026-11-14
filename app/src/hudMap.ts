@@ -22,6 +22,8 @@ export class HudMap {
     this.center = world.base;
     this.map = L.map(el, { crs: CRS_MARS, zoomControl: false, attributionControl: false, dragging: false, scrollWheelZoom: false,
       doubleClickZoom: false, touchZoom: false, boxZoom: false, keyboard: false, zoomAnimation: false, fadeAnimation: false, zoomSnap: 0.1, maxZoom: 16 });
+    try {
+    this.map.setView([this.center.lat, this.center.lon], 15, { animate: false });
     this.background = new BaseMap(this.map);
     const pane = this.map.createPane('heat'); pane.style.zIndex = '350'; pane.style.pointerEvents = 'none';
     L.geoJSON(world.hazards, { interactive: false, style: { color: '#ef7f62', weight: 1, fillOpacity: 0.25, dashArray: '7 5' } }).addTo(this.map);
@@ -30,8 +32,14 @@ export class HudMap {
     this.fit();
     this.observer = new ResizeObserver(() => { this.map.invalidateSize(); this.fit(); });
     this.observer.observe(el);
+    } catch (error) {
+      this.map.remove();
+      throw error;
+    }
   }
   private fit(): void {
+    const size = this.map.getSize();
+    if (size.x <= 0 || size.y <= 0) return;
     // 回転用の箱は表示窓の√2倍。窓に見える半径を約300mにする。
     const sw = fromLocal(this.center, { x: -300 * Math.SQRT2, y: -300 * Math.SQRT2 });
     const ne = fromLocal(this.center, { x: 300 * Math.SQRT2, y: 300 * Math.SQRT2 });
