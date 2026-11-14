@@ -9,7 +9,7 @@ import { stamp } from './sim';
 export const dustWarning = (forecast: DustForecast): string | null => forecast.arrival_hour === null ? null
   : `⚠ 約 ${forecast.arrival_hour} 時間後に砂嵐が活動地域に到達（シミュレーション）`;
 
-function DustMap({ forecast, region, hour }: { forecast: DustForecast; region: RegionMeta; hour: number }) {
+export function DustMap({ forecast, region, hour }: { forecast: DustForecast; region: RegionMeta; hour: number }) {
   const el = useRef<HTMLDivElement>(null);
   const storms = useRef<L.LayerGroup | null>(null);
   useEffect(() => {

@@ -1,6 +1,7 @@
 // 記録の端末保存（IndexedDB）。通信が途切れても、再読み込みしても、足あとが残る。
 // 設計書 docs/design/02_track_recorder.md の KF4。プライベートウィンドウなどで使えない場合は何もしない。
 import type { RoutePreset, TrackPoint } from '@core';
+import type { Site } from './mapController';
 
 export type SavedSession = {
   version: 1;
@@ -10,6 +11,8 @@ export type SavedSession = {
   preset: RoutePreset;
   startMs: number;
   forcedOffline: boolean;
+  base?: Site;
+  targets?: Site[];
 };
 
 const DB = 'gale-eva';

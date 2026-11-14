@@ -1,8 +1,14 @@
+import L from 'leaflet';
+import { OverviewPane, type OverviewHandle } from './OverviewPane';
+import { routeBounds, followSelection } from './rangeSelect';
+import { DustForecastStrip } from './DustForecastStrip';
+import { PlanPanels, DataPanel } from './PlanPanels';
+import { FieldPanels } from './FieldPanels';
+import { fmtKm, fmtDur, fmtLatLon } from './panelFormat';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   buildTracBack,
   countUnsent,
-  DEFAULT_V0,
   deviationFromRoute,
   dustForecast,
   elevAt,
@@ -29,12 +35,11 @@ import { MapController, ROUTE_COLOR, SLOPE_COLOR, type LayerKey, type Site } fro
 import { densify, stamp } from './sim';
 import { clearSession, loadSession, saveSession } from './store';
 import { renderRiskHeat } from './heatmap';
-import { MiniMap } from './miniMap';
 import { loadWorld, type World } from './world';
 import { RiskHelp } from './RiskHelp';
-import { DustPanel, dustWarning } from './DustPanel';
+import { dustWarning } from './DustPanel';
 import type { BaseMapMode } from './baseMap';
-import { useTargetEditing } from './targetEditing';
+import { snapTarget, useTargetEditing } from './targetEditing';
 import { destinationInfo } from './navigation';
 import { DestinationStatus } from './DestinationStatus';
 import { usePositionFeed } from './position/usePositionFeed';
@@ -51,8 +56,6 @@ type ViewScope = 'plan' | 'field';
 
 
 const PRESETS: RoutePreset[] = ['safe', 'short'];
-const PRESET_LABEL: Record<RoutePreset, string> = { safe: '安全優先ルート', short: '最短時間ルート', science: '科学探査ルート' };
-const PRESET_TAG: Record<RoutePreset, string> = { safe: '推奨', short: '効率重視', science: '観測重視' };
 const SLOPE_NAME = ['安全', '注意', '制限', '通行不可'];
 const LAYERS: { key: LayerKey; label: string }[] = [
   { key: 'heat', label: '周辺の危険度' },
@@ -65,30 +68,25 @@ const O2_START_MIN = 420; // シミュレーション値
 const BATTERY_START_MIN = 540; // シミュレーション値
 const WALK_FLAT = 0.38; // 平地での歩く速さ（m/s）
 
-const fmtKm = (m: number): string => (m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`);
-const fmtDur = (s: number): string => {
-  const min = Math.round(s / 60);
-  return min >= 60 ? `${Math.floor(min / 60)}h ${String(min % 60).padStart(2, '0')}m` : `${min} 分`;
-};
-const fmtLatLon = (p: LatLon): string => `${Math.abs(p.lat).toFixed(4)}°${p.lat < 0 ? 'S' : 'N'}, ${p.lon.toFixed(4)}°E`;
+
 
 
 export function App() {
   const devices = useFieldDevices();
   const [world, setWorld] = useState<World | null>(null);
+  const [baseOverride, setBaseOverride] = useState<Site | null>(null);
+  const base = baseOverride ?? world?.base ?? null;
+  const fieldWorld = useMemo(() => world && base ? { ...world, base } : null, [world, base]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>('plan');
   const [baseMapMode, setBaseMapMode] = useState<BaseMapMode>('mono');
   const [layers, setLayers] = useState<Record<Exclude<LayerKey, 'heat'>, boolean>>({ contours: true, hazard: true, slope: false, hillshade: false });
   const [heatOn, setHeatOn] = useState<Record<ViewScope, boolean>>({ plan: false, field: true });
   const [riskHelpOpen, setRiskHelpOpen] = useState(false);
+  const [overviewVisible, setOverviewVisible] = useState(true);
   const [miniOpen, setMiniOpen] = useState<Record<ViewScope, boolean>>(() => ({
     plan: false,
     field: !window.matchMedia('(max-width: 900px)').matches,
-  }));
-  const [dustOpen, setDustOpen] = useState<Record<ViewScope, boolean>>(() => ({
-    plan: false,
-    field: !window.matchMedia('(max-width: 900px), (max-height: 700px)').matches,
   }));
   const scope: ViewScope = mode === 'plan' ? 'plan' : 'field';
   const heatVisible = heatOn[scope];
@@ -107,14 +105,14 @@ export function App() {
   const [forcedOffline, setForcedOffline] = useState(false);
   const [backIdx, setBackIdx] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
-  const [temp, setTemp] = useState<LatLon | null>(null);
+  const [temp, setTemp] = useState<(LatLon & { source: 'operation' | 'overview' }) | null>(null);
   const [restored, setRestored] = useState(false);
   const [saveState, setSaveState] = useState<'idle' | 'saved' | 'failed'>('idle');
   const targetEditing = useTargetEditing(world, mode === 'plan', setTargets, setTargetId, setNotice);
 
   const mapEl = useRef<HTMLDivElement>(null);
-  const miniEl = useRef<HTMLDivElement>(null);
-  const mini = useRef<MiniMap | null>(null);
+  const overview = useRef<OverviewHandle | null>(null);
+  const [selection, setSelection] = useState<L.LatLngBounds | null>(null);
   const coordEl = useRef<HTMLSpanElement>(null);
   const ctl = useRef<MapController | null>(null);
   const heatCenter = useRef<LatLon | null>(null);
@@ -139,7 +137,10 @@ export function App() {
     loadSession().then((s) => {
       if (!s) return;
       startMs.current = s.startMs;
-      setTargetId(s.targetId === 'custom' ? 'T1' : s.targetId);
+      const restoredTargets = s.targets ?? world.targets;
+      setTargets(restoredTargets);
+      setBaseOverride(s.base ?? null);
+      setTargetId(restoredTargets.some((t) => t.id === s.targetId) ? s.targetId : world.targets[0].id);
       setPreset(s.preset === 'science' ? 'safe' : s.preset);
       setForcedOffline(s.forcedOffline);
       lastSaved.current = s.track;
@@ -153,8 +154,8 @@ export function App() {
   }, [world]);
 
   // ---- 記録を端末へ保存する。変わり続けていても、最大 1 秒ごとに保存する（待つだけのタイマーだと、再生中はずっと保存されない）----
-  const latest = useRef({ track, targetId, preset, forcedOffline });
-  latest.current = { track, targetId, preset, forcedOffline };
+  const latest = useRef({ track, targetId, preset, forcedOffline, base: base ?? undefined, targets });
+  latest.current = { track, targetId, preset, forcedOffline, base: base ?? undefined, targets };
   const lastSaved = useRef<TrackPoint[] | null>(null);
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -174,7 +175,7 @@ export function App() {
       world.region,
       world.contours,
       world.hazards,
-      (lat, lon) => setTemp({ lat, lon }),
+      (lat, lon) => setTemp({ lat, lon, source: 'operation' }),
       (lat, lon) => {
         if (!coordEl.current) return;
         const point = { lat, lon };
@@ -188,10 +189,11 @@ export function App() {
         }
         coordEl.current.textContent = text;
       },
-      (bounds) => mini.current?.setViewport(bounds),
+      (bounds) => overview.current?.setViewport(bounds),
+      { zoomSnap: 0, zoomDelta: 0.5 },
     );
     ctl.current = c;
-    const observer = new ResizeObserver(() => c.map.invalidateSize());
+    const observer = new ResizeObserver(() => c.resize());
     observer.observe(mapEl.current);
     return () => {
       observer.disconnect();
@@ -203,10 +205,10 @@ export function App() {
   // ---- 01 ルートの計画 ----
   const target = targets.find((t) => t.id === targetId) ?? null;
   useEffect(() => {
-    if (!world || !target) return;
+    if (!world || !base || !target) return;
     setRoutes(null);
     const id = window.setTimeout(() => {
-      const s = latLonToCell(world.grid, world.base);
+      const s = latLonToCell(world.grid, base);
       const g = latLonToCell(world.grid, target);
       if (!s || !g) return setRoutes([]);
       const found = PRESETS.map((p) => planRoute(world.grid, world.slope, world.aspect, s, g, p, {
@@ -218,13 +220,13 @@ export function App() {
       setRoutes(found);
     }, 30);
     return () => window.clearTimeout(id);
-  }, [world, target]);
+  }, [world, base, target]);
 
   const route = routes?.find((r) => r.preset === preset) ?? routes?.[0] ?? null;
 
   // ---- 02 足あとの記録（シミュレーションの再生）----
   const online = !forcedOffline;
-  const positionFeed = usePositionFeed({ world, mode, playing, speed, online, setTrack, setPlaying });
+  const positionFeed = usePositionFeed({ world: fieldWorld, mode, playing, speed, online, setTrack, setPlaying });
   const POINTS_PER_SEC = 6;
 
   // 通信が戻ったら、たまった記録を古い順に送る
@@ -290,7 +292,7 @@ export function App() {
   const backPos = mode === 'tracback' ? backPath.current[Math.min(backIdx, backPath.current.length - 1)] ?? null : null;
   const backProgress = backPath.current.length > 1 ? backIdx / (backPath.current.length - 1) : 0;
   const field = fieldPosition(pos, backPos, backPath.current, backIdx, backProgress);
-  const destination = useMemo(() => destinationInfo(mode === 'plan' ? world?.base ?? null : backPos ?? pos, target, route?.coords ?? null, mode === 'plan'), [mode, world, backPos, pos, target, route]);
+  const destination = useMemo(() => destinationInfo(mode === 'plan' ? base : backPos ?? pos, target, route?.coords ?? null, mode === 'plan'), [mode, base, backPos, pos, target, route]);
   const nextManeuver = useMemo(() => {
     if (!lost || mode !== 'tracback') return 0;
     const done = backIdx * backStep_m - lost.nb.distance_m;
@@ -302,30 +304,16 @@ export function App() {
     return lost.plan.maneuvers.length - 1;
   }, [lost, mode, backIdx]);
 
-  // ---- ミニマップ ----
+  // Route selection establishes the range; field tracking only translates it.
   useEffect(() => {
-    const c = ctl.current;
-    if (!world || miniCollapsed || !miniEl.current || !c) return;
-    const overview = new MiniMap(miniEl.current, world.region, (p) => c.map.panTo([p.lat, p.lon]));
-    mini.current = overview;
-    overview.setViewport(c.map.getBounds());
-    return () => {
-      mini.current = null;
-      overview.destroy();
-    };
-  }, [world, miniCollapsed]);
+    if (route?.coords.length) setSelection(routeBounds(route.coords));
+    else if (world) setSelection(L.latLngBounds([world.region.south, world.region.west], [world.region.north, world.region.east]));
+  }, [route, world]);
   useEffect(() => {
-    if (world) mini.current?.setSites(world.base, targets);
-  }, [world, targets, miniCollapsed]);
-  useEffect(() => {
-    mini.current?.setRoute(route?.coords ?? [], ROUTE_COLOR[route?.preset ?? 'safe']);
-  }, [world, route, miniCollapsed]);
-  useEffect(() => {
-    mini.current?.setTrack(track);
-  }, [world, track, miniCollapsed]);
-  useEffect(() => {
-    mini.current?.setExplorer(backPos ?? pos);
-  }, [world, backPos, pos, miniCollapsed]);
+    const p = backPos ?? pos;
+    if (mode !== 'plan' && p) setSelection(b => b ? followSelection(b, p) : b);
+  }, [mode, backPos?.lat, backPos?.lon, pos?.lat, pos?.lon]);
+  useEffect(() => { if (selection) ctl.current?.setSelection(selection, true, false); }, [selection, world]);
 
   // ---- 周辺の危険度 ----
   const explorerPos = backPos ?? pos;
@@ -334,7 +322,7 @@ export function App() {
     if (!c || !world) return;
     const update = (center: LatLon, force: boolean): void => {
       if (!latLonToCell(world.grid, center)) {
-        c.setHeat(null);
+        c.setHeat(null); overview.current?.controller.setHeat(null);
         heatCenter.current = null;
         return;
       }
@@ -346,10 +334,10 @@ export function App() {
         img = renderRiskHeat(world, center, 300);
       }
       heatCenter.current = center;
-      c.setHeat(img);
+      c.setHeat(img); overview.current?.controller.setHeat(img);
     };
     if (!heatVisible) {
-      c.setHeat(null);
+      c.setHeat(null); overview.current?.controller.setHeat(null);
       heatCenter.current = null;
       return;
     }
@@ -364,7 +352,7 @@ export function App() {
     }
     if (explorerPos) update(explorerPos, false);
     else {
-      c.setHeat(null);
+      c.setHeat(null); overview.current?.controller.setHeat(null);
       heatCenter.current = null;
     }
   }, [world, mode, heatVisible, explorerPos?.lat, explorerPos?.lon]);
@@ -372,44 +360,57 @@ export function App() {
   // ---- 地図への反映 ----
   useEffect(() => {
     ctl.current?.setBaseMap(baseMapMode);
-    mini.current?.setBaseMap(baseMapMode);
+    overview.current?.controller.setBaseMap(baseMapMode);
   }, [world, baseMapMode, miniCollapsed]);
   useEffect(() => {
-    for (const l of LAYERS) ctl.current?.setLayer(l.key, l.key === 'heat' ? heatVisible : layers[l.key]);
+    for (const c of [ctl.current, overview.current?.controller]) for (const l of LAYERS) c?.setLayer(l.key, l.key === 'heat' ? heatVisible : layers[l.key]);
   }, [layers, heatVisible, world]);
   useEffect(() => {
-    if (world) ctl.current?.setSites(world.base, targets, world.landmarks, targetId, (id) => modeRef.current === 'plan' && setTargetId(id), mode === 'plan' ? targetEditing.move : undefined);
-  }, [world, targets, targetId, mode, targetEditing.move]);
+    if (!world || !base) return;
+    ctl.current?.setSites(base, targets, world.landmarks, targetId, (id) => modeRef.current === 'plan' && setTargetId(id), mode === 'plan' ? targetEditing.move : undefined);
+    overview.current?.controller.setSites(base, targets, world.landmarks, targetId, (id) => modeRef.current === 'plan' && setTargetId(id));
+  }, [world, base, targets, targetId, mode, targetEditing.move]);
   useEffect(() => {
     ctl.current?.setRoutes(routes ?? [], route?.preset ?? null, mode !== 'plan');
+    overview.current?.controller?.setRoutes(routes ?? [], route?.preset ?? null, mode !== 'plan');
   }, [routes, route, mode, world]);
   useEffect(() => {
     ctl.current?.setTrack(track);
+    overview.current?.controller?.setTrack(track);
   }, [track, world]);
   useEffect(() => {
     const err = pos ? (backPos ? Math.max(5, pos.err_m * (1 - backProgress)) : pos.err_m) : 0;
     ctl.current?.setExplorer(backPos ?? pos, err, field.heading);
+    overview.current?.controller?.setExplorer(backPos ?? pos, err, field.heading);
   }, [pos, backPos, mode, backProgress, field.heading]);
   useEffect(() => {
     const c = ctl.current;
     if (!c) return;
     if (mode === 'lost' && lost && pos) {
       c.setHints(lost.fix, track[lost.nb.index], pos);
+      overview.current?.controller.setHints(lost.fix, track[lost.nb.index], pos);
       c.setTracBack(null, null, 0);
+      overview.current?.controller.setTracBack(null, null, 0);
     } else if (mode === 'tracback' && lost) {
       c.setHints(null, null, null);
+      overview.current?.controller.setHints(null, null, null);
       c.setTracBack(lost.plan, track[lost.nb.index] ? pos : null, nextManeuver);
+      overview.current?.controller.setTracBack(lost.plan, track[lost.nb.index] ? pos : null, nextManeuver);
     } else {
       c.setHints(null, null, null);
+      overview.current?.controller.setHints(null, null, null);
       c.setTracBack(null, null, 0);
+      overview.current?.controller.setTracBack(null, null, 0);
     }
   }, [mode, lost, nextManeuver]);
 
   // 地図をクリックした地点の情報ウィンドウ
   useEffect(() => {
-    const c = ctl.current;
-    if (!c || !world) return;
-    if (!temp) return c.setTemp(null, '');
+    ctl.current?.setTemp(null, '');
+    overview.current?.controller.setTemp(null, '');
+    if (!temp || !world) return;
+    const c = temp.source === 'overview' ? overview.current?.controller : ctl.current;
+    if (!c) return;
     const cell = latLonToCell(world.grid, temp);
     const z = elevAt(world.grid, temp);
     let body = '<span class="muted">この範囲は計算対象外です（地形データなし）</span>';
@@ -427,15 +428,28 @@ export function App() {
         body += `・傾斜 ${s.toFixed(0)}°（${SLOPE_NAME[k]}）<br><b>危険度 ${risk.risk.toFixed(2)}（${RISK_BANDS[risk.band].label}）</b><br>傾斜 ${s.toFixed(1)}° による ${risk.slopeTerm.toFixed(2)} + 起伏 ${roughLabel} による ${risk.roughTerm.toFixed(2)}<br>合計は最大 1（表示値は丸めています）`;
         if (risk.blocked) body += `<br>傾斜が上限 ${world.region.slope_max_deg}° を超えるため、通行不可・危険度 1`;
       }
-      if (canGo) body += '<br><button class="popbtn">ここを目的地にする</button>';
     }
+    const placement = canGo ? snapTarget(world, temp) : null;
+    if (placement) body += '<br><button class="popbtn">ここに目的地を追加</button> <button class="popbtn" data-action="base">ここに基地を置く</button>';
     c.setTemp(temp, `<b>選んだ地点</b><br>${fmtLatLon(temp)}<br>${body}`, () => {
-      const custom: Site = { id: 'custom', name: '選んだ地点', ...temp };
-      setTargets((ts) => [...ts.filter((t) => t.id !== 'custom'), custom]);
-      setTargetId('custom');
+      if (!placement || modeRef.current !== 'plan') return;
+      const custom: Site = {
+        id: `custom-${crypto.randomUUID()}`,
+        name: `追加した目的地 ${targets.filter((t) => t.id.startsWith('custom')).length + 1}`,
+        ...placement,
+        note: '地図をクリックして追加した目的地です',
+      };
+      setTargets((ts) => [...ts, custom]);
+      setTargetId(custom.id);
+      setNotice('目的地を追加しました。通れるマスに合わせてルートを再計算します。');
+      setTemp(null);
+    }, () => {
+      if (!placement || modeRef.current !== 'plan') return;
+      setBaseOverride({ ...world.base, ...placement, name: '基地（配置済み）' });
+      setNotice('基地を配置しました。通れるマスに合わせてルートを再計算します。');
       setTemp(null);
     });
-  }, [temp, world, mode]);
+  }, [temp, world, mode, targets]);
 
   // ---- 操作 ----
   const depart = (): void => {
@@ -471,10 +485,10 @@ export function App() {
   };
 
   const currentMs = startMs.current + (stats.elapsed_s + backElapsed) * 1000;
-  const clock = world ? stamp(currentMs, world.base.lon) : null;
+  const clock = base ? stamp(currentMs, base.lon) : null;
   const weatherWarning = forecast ? dustWarning(forecast) : null;
   const hudState: HudState = { ...field, health, healthOn: devices.healthOn, overviewOn: !miniCollapsed, online, source: backPos ? 'dead_reckoning' : positionFeed.fix?.source ?? 'simulation', destination,
-    warning: fieldWarning(destination?.offRoute ?? false, weatherWarning, limit, health), baseMapMode, route, track, targets };
+    warning: fieldWarning(destination?.offRoute ?? false, weatherWarning, limit, health), baseMapMode, route, track, targets, base: base ?? undefined };
   const channelError = useBaseDeviceChannel(world ? { ...hudState, hudOn: devices.hudOn, mode, canLost: mode === 'traverse' && track.length >= 3, canReturn: mode === 'lost' && !!lost && !!pos } : null, {
     hud: devices.setHudOn, health: devices.setHealthOn, overview: (on) => setMiniOpen((s) => ({ ...s, [scope]: on })),
     lost: () => { setPlaying(false); setMode('lost'); }, return: startTracBack,
@@ -499,8 +513,8 @@ export function App() {
 
   return (
     <>
-    {devices.localHudVisible && world ? <HudView world={world} state={hudState} onClose={devices.closeLocalHud} onHealthToggle={() => devices.setHealthOn((on) => !on)} onOverviewToggle={() => setMiniOpen((s) => ({ ...s, [scope]: !s[scope] }))} /> : null}
-    <div className={`app ${devices.localHudVisible ? 'dashboard-hidden' : ''}`}>
+    {devices.localHudVisible && fieldWorld ? <HudView world={fieldWorld} state={hudState} onClose={devices.closeLocalHud} onHealthToggle={() => devices.setHealthOn((on) => !on)} onOverviewToggle={() => setMiniOpen((s) => ({ ...s, [scope]: !s[scope] }))} /> : null}
+    <div className={`app layout-split ${devices.localHudVisible ? 'dashboard-hidden' : ''}`}>
       <header className="hdr">
         <div className="brand">
           <span className="planet" aria-hidden="true" />
@@ -536,23 +550,21 @@ export function App() {
               </div>
             ))}
           </div>
-          <div className={`mapwrap ${miniCollapsed ? 'mini-closed' : 'mini-open'} ${dustOpen[scope] ? 'dust-open' : ''}`}>
-            <div ref={mapEl} className="map" aria-label="Gale クレーターの地図。ドラッグで移動、ホイールでズーム、クリックで地点を選ぶ" />
-            <div className="map-tools-left">
-              <div className={`minimap ${miniCollapsed ? 'collapsed' : ''}`}>
-                {miniCollapsed ? (
-                  <button type="button" onClick={() => setMiniOpen((s) => ({ ...s, [scope]: true }))} aria-expanded={false}>全体図を表示</button>
-                ) : (
-                  <>
-                    <div ref={miniEl} className="minimap-map" aria-label="活動地域の全体図。クリックでメインの地図を移動" />
-                    <button type="button" className="minimap-collapse" onClick={() => setMiniOpen((s) => ({ ...s, [scope]: false }))} aria-label="全体図を隠す" aria-expanded={true}>全体図を隠す</button>
-                  </>
-                )}
-              </div>
-              {world && forecast ? <DustPanel forecast={forecast} region={world.region} open={dustOpen[scope]} onToggle={() => setDustOpen((s) => ({ ...s, [scope]: !s[scope] }))} baseMs={currentMs} lon={world.base.lon} /> : null}
-            </div>
+          <div className={`map-row ${overviewVisible ? '' : 'overview-hidden'}`}>
+            {world ? <OverviewPane world={world} selection={selection} onSelection={(bounds) => { ctl.current?.setSelection(bounds); setSelection(bounds); }} onPoint={(lat, lon) => setTemp({ lat, lon, source: 'overview' })} handle={overview} visible={overviewVisible} /> : <section id="dashboard-overview" className="overview-pane" hidden={!overviewVisible}>地形データを読み込んでいます…</section>}
+          <section className="mapwrap" aria-label="操作画面">
+            <div ref={mapEl} className="map" aria-label="操作画面。選んだ範囲内を移動、ホイールでズーム、クリックで地点を選ぶ" />
             {!world ? <div className="loading">地形データを読み込んでいます…</div> : null}
             <div className="layerbar">
+              <button
+                type="button"
+                className={`tog ${overviewVisible ? 'on' : ''}`}
+                aria-expanded={overviewVisible}
+                aria-controls="dashboard-overview"
+                onClick={() => setOverviewVisible((visible) => !visible)}
+              >
+                {overviewVisible ? '表示画面を隠す' : '表示画面を表示'}
+              </button>
               <button className="tog" onClick={devices.openLocalHud} disabled={!world}>HUD 表示</button>
               <button className={`tog ${devices.healthOn ? 'on' : ''}`} aria-pressed={devices.healthOn} onClick={() => devices.setHealthOn((on) => !on)}>健康状態 {devices.healthOn ? 'ON' : 'OFF'}</button>
               <div className="basemap-switch" role="group" aria-label="地図の背景">
@@ -577,7 +589,7 @@ export function App() {
               aria-label="現在地（探査者の位置）へ移動"
               title="現在地（探査者の位置）"
               onClick={() => {
-                ctl.current?.followCurrent(world?.base);
+                ctl.current?.followCurrent(base ?? undefined);
               }}
             >
               ◎
@@ -602,178 +614,25 @@ export function App() {
               <span ref={coordEl} className="coord" />
             </div>
             {heatVisible && riskHelpOpen && world ? <RiskHelp slopeMax={world.region.slope_max_deg} onClose={() => setRiskHelpOpen(false)} /> : null}
+          </section>
           </div>
+          {world && forecast ? <DustForecastStrip forecast={forecast} region={world.region} baseMs={currentMs} /> : null}
         </section>
 
-        <aside className="side">
-          <DeviceLinks onHudOpen={() => devices.setHudOn(true)} />
-          {channelError ? <p role="alert">{channelError}</p> : null}
-          <DestinationStatus info={destination} />
-          <PositionControls feed={positionFeed} planning={mode === 'plan'} online={online} />
-          {notice ? <div className="note ok">{notice}</div> : null}
-
-          {mode === 'plan' ? (
-            <>
-              <h2>ルート候補を比較</h2>
-              <button onClick={targetEditing.reset}>目的地を元の位置に戻す</button>
-              <label className="fld">
-                <span>出発: 基地　→　目的地</span>
-                <select value={targetId} onChange={(e) => setTargetId(e.target.value)}>
-                  {targets.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {target?.note ? <p className="muted small">科学目標: {target.note}</p> : null}
-              {routes === null ? <p className="muted">ルートを計算しています…</p> : null}
-              {routes && routes.length === 0 ? <div className="note warn">通れるルートが見つかりません。目的地を変えてください。</div> : null}
-              {routes?.map((r) => (
-                <button key={r.id} className={`rcard ${r.preset === route?.preset ? 'sel' : ''}`} onClick={() => setPreset(r.preset)}>
-                  <div className="rc-h">
-                    <span className="rc-line" style={{ background: ROUTE_COLOR[r.preset] }} />
-                    <b>{PRESET_LABEL[r.preset]}</b>
-                    <span className="tag">{PRESET_TAG[r.preset]}</span>
-                  </div>
-                  <div className="rc-n">
-                    <span>{fmtKm(r.surface_m)}</span>
-                    <span>
-                      {r.safety_score}
-                      <small> /100</small>
-                    </span>
-                    <span>{fmtDur(r.est_time_s)}</span>
-                  </div>
-                  <div className="muted small">
-                    最大傾斜 {r.max_slope_deg.toFixed(0)}°・急な区間 {fmtKm(r.limited_zone_m)}
-                  </div>
-                </button>
-              ))}
-              {route ? (
-                <>
-                  <h3>ルートの解説</h3>
-                  <div className="explain">
-                    {route.explanation.map((s) => (
-                      <p key={s}>{s}</p>
-                    ))}
-                    <p className="muted small">計算結果からテンプレートで作った文章です（生成 AI は使っていません）。</p>
-                  </div>
-                  <label className="inline">再生速度（シミュレーション）
-                    <select value={speed} onChange={(e) => setSpeed(Number(e.target.value))}>
-                      <option value={1}>×1</option><option value={3}>×3</option><option value={8}>×8</option>
-                    </select>
-                  </label>
-                  {positionFeed.kind === 'json' ? <p className="muted small">JSONの時刻間隔もこの速度で再生します（30秒間隔なら×8で約3.75秒ごと）。</p> : null}
-                  <button className="primary" onClick={depart}>
-                    このルートで出発（シミュレーション）
-                  </button>
-                </>
-              ) : null}
-              <details className="about">
-                <summary>指標とデータの説明</summary>
-                {world ? <p>周辺の危険度 = min(1, (傾斜 / {world.region.slope_max_deg}°)² + 0.5 × 起伏)。傾斜 {world.region.slope_max_deg}° 超は危険度 1。</p> : null}
-                {world ? <p>EVA 安全スコア = 100 − 40×(急な区間の長さ/全長) − 30×(最大傾斜/{world.region.slope_max_deg}°) − 20×(所要時間/6 時間) − 10×(圏外の長さ/全長)</p> : null}
-                {world ? <p>歩く速さ = {DEFAULT_V0} m/s × exp(−3.5×|勾配 + 0.05|)（Tobler の式を宇宙服向けに上限を下げたもの）。このアプリでは傾斜 {world.region.slope_max_deg}° 超は通行不可の設定です。</p> : null}
-                <p>地形: {world?.region.source.credit}（{world?.region.source.product}）。{world?.region.source.note}。</p>
-                <p>画像: NASA/JPL-Caltech Mars Trek、HiRISE: NASA/JPL/University of Arizona。目印の名前は仮のもので、公式の地名ではありません。</p>
-              </details>
-            </>
-          ) : null}
-
-          {mode === 'traverse' ? (
-            <>
-              <h2>足あとの記録</h2>
-              <div className="note">火星には GPS がありません。位置は推測航法による<b>推定</b>で、青い円が誤差の範囲です。この移動は<b>シミュレーション</b>です。</div>
-              {restored ? <p className="muted small">復元した記録です。続きの再生はできませんが、「迷った」から来た道を戻れます。</p> : null}
-              <div className="row">
-                <button onClick={() => setPlaying((p) => !p)} disabled={simEnded}>
-                  {playing ? '一時停止' : '再開'}
-                </button>
-                <label className="inline">
-                  再生速度
-                  <select value={speed} onChange={(e) => setSpeed(Number(e.target.value))}>
-                    <option value={1}>×1</option>
-                    <option value={3}>×3</option>
-                    <option value={8}>×8</option>
-                  </select>
-                </label>
-              </div>
-              <label className="switch">
-                <input type="checkbox" checked={forcedOffline} onChange={(e) => setForcedOffline(e.target.checked)} />
-                通信遮断モード（圏外にする）
-              </label>
-              <p className="muted small">圏外の間も記録は端末にたまり、通信が戻ると古い順に送られます。記録 {track.length} 点・未送信 {unsent} 件。</p>
-              {offRoute ? <div className="note warn">予定ルートから {Math.round(deviation)} m 外れています。</div> : <p className="muted small">予定ルートからのずれ: {Math.round(deviation)} m</p>}
-              {simEnded && !restored ? <div className="note warn">{positionFeed.kind === 'simulation' ? '周りの地形が予定と合いません。迷った可能性があります。' : '位置情報ファイルの再生が終わりました。'}</div> : null}
-              <button className="danger" onClick={() => { setPlaying(false); setMode('lost'); }} disabled={track.length < 3}>
-                迷った
-              </button>
-              <button className="ghost" onClick={reset}>計画に戻る</button>
-            </>
-          ) : null}
-
-          {mode === 'lost' && lost && limit && pos ? (
-            <>
-              <h2>迷ったとき</h2>
-              <div className={`limit ${limit.level}`}>
-                <div className="small">帰還の限界</div>
-                <b>{limit.text}</b>
-                <div className="small">
-                  戻りの所要 {Math.round(limit.t_back_min)} 分（余裕 1.3 倍込み）・酸素の残り {Math.round(o2)} 分
-                </div>
-              </div>
-              <dl className="facts">
-                <dt>今の推定位置</dt>
-                <dd>{fmtLatLon(pos)}（誤差 ±{Math.round(pos.err_m)} m）</dd>
-                <dt>いちばん近い足あと</dt>
-                <dd>
-                  方位 {Math.round(lost.nb.bearing_deg)}° へ {Math.round(lost.nb.distance_m)} m
-                </dd>
-                <dt>最後に位置を確定した地点</dt>
-                <dd>{lost.fix ? `${lost.fix.lmst}（${lost.fix.note ?? '出発点'}）` : 'なし'}</dd>
-                <dt>近くの目印</dt>
-                <dd>{lost.near.map((n) => `${n.l.name}（${Math.round(n.d)} m）`).join('、')}</dd>
-              </dl>
-              <button className="primary big" onClick={startTracBack}>
-                来た道を戻る
-              </button>
-              <p className="muted small">行きに通れた道は帰りも通れる可能性が高いので、知らない近道より来た道を優先します。通信がなくても動きます。</p>
-              <button className="ghost" onClick={() => { setMode('traverse'); }}>記録に戻る</button>
-            </>
-          ) : null}
-
-          {mode === 'tracback' && lost && limit ? (
-            <>
-              <h2>とんぼ返り</h2>
-              <div className="nav">
-                <div className="small muted">次の案内</div>
-                <b>{backIdx * backStep_m < lost.nb.distance_m ? `足あとまで、方位 ${Math.round(lost.nb.bearing_deg)}° へ ${Math.round(lost.nb.distance_m)} m` : lost.plan.maneuvers[nextManeuver]?.text}</b>
-              </div>
-              <div className={`limit ${limit.level}`}>
-                <div className="small">帰還の限界</div>
-                <b>{limit.level === 'red' ? limit.text : `余裕 ${Math.floor(limit.margin_min)} 分`}</b>
-                <div className="small">
-                  残り {fmtKm((1 - backProgress) * (lost.plan.total_m + lost.nb.distance_m))}・約 {Math.round(limit.t_back_min)} 分
-                </div>
-              </div>
-              <ol className="steps">
-                {lost.plan.maneuvers.map((m, i) => (
-                  <li key={m.index} className={i === nextManeuver ? 'cur' : i < nextManeuver ? 'done' : ''}>
-                    {m.text}
-                  </li>
-                ))}
-              </ol>
-              <label className="inline">
-                再生速度
-                <select value={speed} onChange={(e) => setSpeed(Number(e.target.value))}>
-                  <option value={1}>×1</option>
-                  <option value={3}>×3</option>
-                  <option value={8}>×8</option>
-                </select>
-              </label>
-            </>
-          ) : null}
-        </aside>
+        <div className="panel-grid">
+          <FieldPanels mode={mode} setMode={setMode} restored={restored} playing={playing} setPlaying={setPlaying} simEnded={simEnded} speed={speed} setSpeed={setSpeed} forcedOffline={forcedOffline} setForcedOffline={setForcedOffline} track={track} unsent={unsent} offRoute={offRoute} deviation={deviation} simulation={positionFeed.kind === 'simulation'} reset={reset} startTracBack={startTracBack} lost={lost} limit={limit} pos={pos} o2={o2} backIdx={backIdx} backStep_m={backStep_m} nextManeuver={nextManeuver} backProgress={backProgress} />
+          <section className="panel-card"><DestinationStatus info={destination} /></section>
+          {mode === 'plan' ? <PlanPanels targets={targets} targetId={targetId} setTargetId={setTargetId} target={target} routes={routes} route={route} setPreset={setPreset} speed={speed} setSpeed={setSpeed} depart={depart} resetTargets={targetEditing.reset} jsonSource={positionFeed.kind === 'json'} resetBase={() => { setBaseOverride(null); setNotice('基地を元の位置に戻しました。'); }} baseMoved={baseOverride !== null} /> : null}
+          <section className="panel-card"><PositionControls feed={positionFeed} planning={mode === 'plan'} online={online} /></section>
+          <section className="panel-card"><DeviceLinks onHudOpen={() => devices.setHudOn(true)} />{channelError ? <p role="alert">{channelError}</p> : null}</section>
+          <DataPanel world={world} />
+          {notice ? <div className="note ok" role="status">{notice}</div> : null}
+        </div>
+      </div>
+      <div className="dashboard-actions" aria-label="現場の操作">
+        {mode === 'plan' ? <button disabled={!route} onClick={depart}>このルートで出発（シミュレーション）</button> : null}
+        {mode === 'traverse' ? <button disabled={track.length < 3} onClick={() => { setPlaying(false); setMode('lost'); }}>迷った</button> : null}
+        {mode === 'lost' ? <button disabled={!lost || !pos} onClick={startTracBack}>来た道を戻る</button> : null}
       </div>
     </div>
     </>

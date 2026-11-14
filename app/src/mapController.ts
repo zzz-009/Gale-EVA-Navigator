@@ -1,3 +1,4 @@
+import { outsideRing } from './rangeSelect';
 // Leaflet の地図をまとめて扱うクラス。React からは、状態が変わるたびに set〜 を呼ぶだけにする。
 import L from 'leaflet';
 import { haversine, type Landmark, type Route, type RoutePreset, type TracBackPlan, type TrackPoint } from '@core';
@@ -46,6 +47,7 @@ export class MapController {
     onClick: (lat: number, lon: number) => void,
     onMove: (lat: number, lon: number) => void,
     onView: (bounds: L.LatLngBounds) => void,
+    zoomOptions: Pick<L.MapOptions, 'zoomSnap' | 'zoomDelta'> = {},
   ) {
     const bounds: L.LatLngBoundsLiteral = [[region.south, region.west], [region.north, region.east]];
     this.map = L.map(el, {
@@ -55,6 +57,7 @@ export class MapController {
       zoomControl: false,
       maxBounds: [[-90, -180], [90, 180]],
       maxBoundsViscosity: 1,
+      ...zoomOptions,
     });
     this.map.fitBounds(bounds);
     this.explorer = new ExplorerMarker(this.map);
@@ -151,7 +154,55 @@ export class MapController {
     onMove(center.lat, center.lng);
   }
 
+  private selection: L.LatLngBounds | null = null;
+  private selectionMask: L.Polygon | null = null;
+  private applySelectionBounds = (): void => {
+    if (this.selection) this.map.setMaxBounds(this.selection);
+  };
+
+  setSelection(bounds: L.LatLngBounds, animate = true, fit = true): void {
+    if (!fit && this.selection?.equals(bounds)) return;
+    const firstSelection = this.selection === null;
+    this.selection = bounds;
+    if (!this.map.getPane('selection-mask')) {
+      const pane = this.map.createPane('selection-mask');
+      pane.style.zIndex = '640';
+      pane.style.pointerEvents = 'none';
+    }
+    if (this.selectionMask) this.selectionMask.setLatLngs(outsideRing(bounds));
+    else this.selectionMask = L.polygon(outsideRing(bounds), {
+      pane: 'selection-mask', stroke: false, fillColor: '#000', fillOpacity: 1,
+      fillRule: 'evenodd', interactive: false,
+    }).addTo(this.map);
+    const size = this.map.getSize();
+    if (!size.x || !size.y) return;
+    // Stop the previous fit without maxBounds starting a second pan from its
+    // moveend callback. Restore that handler once the new fit has finished.
+    this.map.off('moveend', this.applySelectionBounds);
+    this.map.setMaxBounds(L.latLngBounds([]));
+    this.map.stop();
+    this.map.setMinZoom(2);
+    this.map.options.maxBounds = bounds;
+    this.map.once('moveend', this.applySelectionBounds);
+    if (fit || firstSelection) {
+      this.map.fitBounds(bounds, { animate, duration: 0.4 });
+    } else {
+      this.map.panInsideBounds(bounds, { animate });
+      this.applySelectionBounds();
+    }
+  }
+
+  resize(): void {
+    const container = this.map.getContainer();
+    if (!container.clientWidth || !container.clientHeight) return;
+    this.map.invalidateSize({ animate: false });
+  }
+
   destroy(): void {
+    // Stopping a pan fires moveend. Detach maxBounds/popup handlers first so
+    // they cannot start another pan while the map is being removed.
+    this.map.off('moveend');
+    this.map.stop();
     this.explorer.destroy();
     this.map.remove();
   }
@@ -278,13 +329,15 @@ export class MapController {
     }
   }
 
-  setTemp(pos: { lat: number; lon: number } | null, html: string, onAction?: () => void): void {
+  setTemp(pos: { lat: number; lon: number } | null, html: string, onAction?: () => void, onBase?: () => void): void {
     this.temp.clearLayers();
     if (!pos) return;
     const box = document.createElement('div');
     box.innerHTML = html;
     const btn = box.querySelector('button');
     if (btn && onAction) btn.addEventListener('click', onAction);
+    const baseButton = box.querySelector<HTMLButtonElement>('[data-action="base"]');
+    if (baseButton && onBase) baseButton.addEventListener('click', onBase);
     L.marker([pos.lat, pos.lon], { icon: dot('#ffffff', 16, '#0b1418') }).bindPopup(box, { autoPan: true }).addTo(this.temp).openPopup();
   }
 }

@@ -12,6 +12,7 @@ export type HudState = FieldPosition & {
   overviewOn: boolean;
   online: boolean; source: PositionFix['source']; destination: DestinationInfo | null; warning: string | null;
   baseMapMode: BaseMapMode; route: Route | null; track: TrackPoint[]; targets: Site[];
+  base?: Site;
 };
 export function fieldPosition(pos: TrackPoint | null, backPos: LatLon | null, path: LatLon[], index: number, progress: number): FieldPosition {
   const previous = path[Math.max(0, index - 1)];

@@ -27,7 +27,7 @@ export function usePositionFeed(options: Options) {
     }).then((data) => { if (version === importVersion.current) setFeed(parsePositionFeed(data, region)); })
       .catch((e: unknown) => { if (!controller.signal.aborted && version === importVersion.current) setError(String(e)); });
     return () => controller.abort();
-  }, [options.world]);
+  }, [options.world?.region]);
   useEffect(() => { source.current?.setOnline(options.online); }, [options.online]);
   useEffect(() => {
     const current = source.current;

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRemoteDeviceChannel } from './deviceChannel';
 import { loadWorld, type World } from './world';
 import { HudView } from './HudView';
@@ -15,9 +15,12 @@ export function DeviceView({ view }: { view: 'hud' | 'wrist' }) {
     return () => { active = false; };
   }, [view]);
   const state = remote.snapshot;
+  const base = state?.base;
+  const fieldWorld = useMemo(() => world && base ? { ...world, base } : world,
+    [world, base?.id, base?.lat, base?.lon, base?.name, base?.note]);
   return <>
-    {view === 'wrist' ? <WristView state={state} connected={remote.connected} send={remote.send} /> : state && world && state.hudOn ?
-      <HudView world={world} state={state} /> : <main className="device-wait"><h1>ヘルメット表示</h1><p>{state && !state.hudOn ? 'HUD 表示 OFF' : '基地の画面と地形データを待っています'}</p><button disabled={!remote.connected} onClick={() => remote.send({ action: 'hud', value: true })}>HUD 表示 ON</button></main>}
+    {view === 'wrist' ? <WristView state={state} connected={remote.connected} send={remote.send} /> : state && fieldWorld && state.hudOn ?
+      <HudView world={fieldWorld} state={state} /> : <main className="device-wait"><h1>ヘルメット表示</h1><p>{state && !state.hudOn ? 'HUD 表示 OFF' : '基地の画面と地形データを待っています'}</p><button disabled={!remote.connected} onClick={() => remote.send({ action: 'hud', value: true })}>HUD 表示 ON</button></main>}
     {!remote.connected || error || remote.error ? <div className="device-connection" role="status">{error ?? remote.error ?? '基地との連携待ち。基地画面を同じブラウザで開いてください。表示は更新されていません。'}</div> : null}
   </>;
 }
