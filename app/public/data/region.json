@@ -1,0 +1,43 @@
+{
+  "body": "mars",
+  "name": "Gale crater — Mount Sharp foothills",
+  "width": 600,
+  "height": 600,
+  "cell_m": 5.0588,
+  "cell_ew_m": 5.0417,
+  "north": -4.6857199,
+  "south": -4.7369271,
+  "west": 137.3641831,
+  "east": 137.4153902,
+  "dlat_deg": 8.534527031064166e-05,
+  "dlon_deg": 8.534527031064461e-05,
+  "radius_m": 3396190.0,
+  "elev_min_m": -4394.1,
+  "elev_max_m": -4047.6,
+  "valid_fraction": 1.0,
+  "slope_max_deg": 20.0,
+  "slope_limited_deg": 15.0,
+  "contour_step_m": 5,
+  "contour_index_m": 25,
+  "layers": {
+    "elev": "elev.f32",
+    "rough": "rough.f32",
+    "hillshade": "hillshade.png",
+    "slope_class": "slope_class.png",
+    "contours": "contours.geojson",
+    "hazard_zones": "hazard_zones.geojson"
+  },
+  "source": {
+    "product": "DTEEC_040770_1755_039280_1755_U01",
+    "url": "https://www.uahirise.org/dtm/dtm.php?ID=ESP_040770_1755",
+    "credit": "NASA/JPL-Caltech/University of Arizona (HiRISE DTM)",
+    "native_resolution_m": 1.0117630165416,
+    "window_px": {
+      "row0": 6000,
+      "row1": 9000,
+      "col0": 1700,
+      "col1": 4700
+    },
+    "note": "5 × 5 画素を平均。これより小さい岩などの障害物は表れない"
+  }
+}

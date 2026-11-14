@@ -1,0 +1,11 @@
+data/raw/
+node_modules/
+.venv/
+dist/
+.npm-cache/
+.claude/
+*.IMG
+*.tif
+__pycache__/
+.vercel/
+.env*
