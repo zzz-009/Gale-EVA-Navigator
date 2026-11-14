@@ -30,7 +30,7 @@ import {
   type TrackPoint,
 } from '@core';
 import { MapController, ROUTE_COLOR, SLOPE_COLOR, type LayerKey, type Site } from './mapController';
-import { densify, makeSimTrack, stamp } from './sim';
+import { densify, stamp } from './sim';
 import { clearSession, loadSession, saveSession } from './store';
 import { renderRiskHeat } from './heatmap';
 import { MiniMap } from './miniMap';
@@ -38,6 +38,15 @@ import type { HazardSettings } from './hazardText';
 import { RiskHelp } from './RiskHelp';
 import { DustPanel, dustWarning } from './DustPanel';
 import type { BaseMapMode } from './baseMap';
+import { useTargetEditing } from './targetEditing';
+import { destinationInfo } from './navigation';
+import { DestinationStatus } from './DestinationStatus';
+import { usePositionFeed } from './position/usePositionFeed';
+import { PositionControls } from './position/PositionControls';
+import { HudView } from './HudView';
+import { useFieldDevices } from './useFieldDevices';
+import { fieldPosition, fieldWarning, type HudState } from './fieldState';
+import { simulateHealth } from './health';
 
 type Mode = 'plan' | 'traverse' | 'lost' | 'tracback';
 type ViewScope = 'plan' | 'field';
@@ -134,6 +143,7 @@ async function loadWorld(): Promise<World> {
 }
 
 export function App() {
+  const devices = useFieldDevices();
   const [world, setWorld] = useState<World | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>('plan');
@@ -169,6 +179,7 @@ export function App() {
   const [temp, setTemp] = useState<LatLon | null>(null);
   const [restored, setRestored] = useState(false);
   const [saveState, setSaveState] = useState<'idle' | 'saved' | 'failed'>('idle');
+  const targetEditing = useTargetEditing(world, mode === 'plan', setTargets, setTargetId, setNotice);
 
   const mapEl = useRef<HTMLDivElement>(null);
   const miniEl = useRef<HTMLDivElement>(null);
@@ -177,7 +188,6 @@ export function App() {
   const ctl = useRef<MapController | null>(null);
   const heatCenter = useRef<LatLon | null>(null);
   const heatRadius = useRef(400);
-  const sim = useRef<TrackPoint[]>([]);
   const backPath = useRef<LatLon[]>([]);
   const startMs = useRef(Date.now());
   const modeRef = useRef(mode);
@@ -198,7 +208,6 @@ export function App() {
     loadSession().then((s) => {
       if (!s) return;
       startMs.current = s.startMs;
-      sim.current = s.track;
       setTargetId(s.targetId === 'custom' ? 'T1' : s.targetId);
       setPreset(s.preset === 'science' ? 'safe' : s.preset);
       setForcedOffline(s.forcedOffline);
@@ -284,27 +293,8 @@ export function App() {
 
   // ---- 02 足あとの記録（シミュレーションの再生）----
   const online = !forcedOffline;
-  const onlineRef = useRef(online);
-  onlineRef.current = online;
-
-  // 再生は「経過した実時間 × 速さ」で進める。タブが裏に回ってタイマーが間引かれても、進み方は変わらない。
+  const positionFeed = usePositionFeed({ world, mode, playing, speed, online, setTrack, setPlaying });
   const POINTS_PER_SEC = 6;
-  useEffect(() => {
-    if (mode !== 'traverse' || !playing) return;
-    const t0 = performance.now();
-    let base = -1;
-    const id = window.setInterval(() => {
-      setTrack((t) => {
-        if (base < 0) base = t.length;
-        const want = Math.min(sim.current.length, base + Math.floor(((performance.now() - t0) / 1000) * POINTS_PER_SEC * speed));
-        if (want >= sim.current.length) setPlaying(false);
-        if (want <= t.length) return t;
-        const sent = onlineRef.current;
-        return [...t, ...sim.current.slice(t.length, want).map((p) => ({ ...p, sent }))];
-      });
-    }, 100);
-    return () => window.clearInterval(id);
-  }, [mode, playing, speed]);
 
   // 通信が戻ったら、たまった記録を古い順に送る
   const unsent = useMemo(() => countUnsent(track), [track]);
@@ -318,7 +308,7 @@ export function App() {
   const pos = track.length ? track[track.length - 1] : null;
   const deviation = useMemo(() => (pos && route ? deviationFromRoute(pos, route.coords) : 0), [pos, route]);
   const offRoute = deviation > OFF_ROUTE_M;
-  const simEnded = mode === 'traverse' && !playing && track.length > 0 && track.length >= sim.current.length;
+  const simEnded = mode === 'traverse' && (positionFeed.ended || restored);
 
   // ---- 03 とんぼ返り ----
   const lost = useMemo(() => {
@@ -343,6 +333,7 @@ export function App() {
   const o2 = Math.max(0, O2_START_MIN - elapsedMin);
   const battery = Math.max(0, BATTERY_START_MIN - elapsedMin);
   const limit = lost ? returnLimit(Math.max(0, lost.plan.est_time_s + lost.approach_s - backElapsed), o2, battery) : null;
+  const health = useMemo(() => simulateHealth(track, stats.elapsed_s + backElapsed, o2, battery / BATTERY_START_MIN * 100, limit?.level), [track, stats.elapsed_s, backElapsed, o2, battery, limit?.level]);
 
   useEffect(() => {
     if (mode !== 'tracback') return;
@@ -367,6 +358,8 @@ export function App() {
 
   const backPos = mode === 'tracback' ? backPath.current[Math.min(backIdx, backPath.current.length - 1)] ?? null : null;
   const backProgress = backPath.current.length > 1 ? backIdx / (backPath.current.length - 1) : 0;
+  const field = fieldPosition(pos, backPos, backPath.current, backIdx, backProgress);
+  const destination = useMemo(() => destinationInfo(mode === 'plan' ? world?.base ?? null : backPos ?? pos, target, route?.coords ?? null, mode === 'plan'), [mode, world, backPos, pos, target, route]);
   const nextManeuver = useMemo(() => {
     if (!lost || mode !== 'tracback') return 0;
     const done = backIdx * backStep_m - lost.nb.distance_m;
@@ -454,8 +447,8 @@ export function App() {
     for (const l of LAYERS) ctl.current?.setLayer(l.key, l.key === 'heat' ? heatVisible : layers[l.key]);
   }, [layers, heatVisible, world]);
   useEffect(() => {
-    if (world) ctl.current?.setSites(world.base, targets, world.landmarks, targetId, (id) => modeRef.current === 'plan' && setTargetId(id));
-  }, [world, targets, targetId]);
+    if (world) ctl.current?.setSites(world.base, targets, world.landmarks, targetId, (id) => modeRef.current === 'plan' && setTargetId(id), mode === 'plan' ? targetEditing.move : undefined);
+  }, [world, targets, targetId, mode, targetEditing.move]);
   useEffect(() => {
     ctl.current?.setRoutes(routes ?? [], route?.preset ?? null, mode !== 'plan');
   }, [routes, route, mode, world]);
@@ -464,8 +457,8 @@ export function App() {
   }, [track, world]);
   useEffect(() => {
     const err = pos ? (backPos ? Math.max(5, pos.err_m * (1 - backProgress)) : pos.err_m) : 0;
-    ctl.current?.setExplorer(backPos ?? pos, err, mode === 'traverse' || mode === 'tracback');
-  }, [pos, backPos, mode, backProgress]);
+    ctl.current?.setExplorer(backPos ?? pos, err, field.heading);
+  }, [pos, backPos, mode, backProgress, field.heading]);
   useEffect(() => {
     const c = ctl.current;
     if (!c) return;
@@ -516,8 +509,9 @@ export function App() {
   // ---- 操作 ----
   const depart = (): void => {
     if (!world || !route) return;
-    startMs.current = Date.now();
-    sim.current = makeSimTrack(route, world.grid, startMs.current);
+    const start = positionFeed.prepare(route, Date.now());
+    if (start === null) return;
+    startMs.current = start;
     setTrack([]);
     setBackIdx(0);
     setNotice(null);
@@ -550,6 +544,8 @@ export function App() {
   const currentMs = startMs.current + (stats.elapsed_s + backElapsed) * 1000;
   const clock = world ? stamp(currentMs, world.base.lon) : null;
   const weatherWarning = forecast ? dustWarning(forecast) : null;
+  const hudState: HudState = { ...field, health, healthOn: devices.healthOn, overviewOn: !miniCollapsed, online, source: backPos ? 'dead_reckoning' : positionFeed.fix?.source ?? 'simulation', destination,
+    warning: fieldWarning(destination?.offRoute ?? false, weatherWarning, limit, health), baseMapMode, route, track, targets };
   const sciCount = route && world ? targets.filter((t) => deviationFromRoute(t, route.coords) < 150).length : 0;
 
   const kpis: { label: string; value: string; sub: string }[] =
@@ -568,7 +564,9 @@ export function App() {
         ];
 
   return (
-    <div className="app">
+    <>
+    {devices.hudOn && world ? <HudView world={world} state={hudState} onClose={() => devices.setHudOn(false)} onHealthToggle={() => devices.setHealthOn((on) => !on)} onOverviewToggle={() => setMiniOpen((s) => ({ ...s, [scope]: !s[scope] }))} /> : null}
+    <div className={`app ${devices.hudOn ? 'dashboard-hidden' : ''}`}>
       <header className="hdr">
         <div className="brand">
           <span className="planet" aria-hidden="true" />
@@ -609,11 +607,11 @@ export function App() {
             <div className="map-tools-left">
               <div className={`minimap ${miniCollapsed ? 'collapsed' : ''}`}>
                 {miniCollapsed ? (
-                  <button type="button" onClick={() => setMiniOpen((s) => ({ ...s, [scope]: true }))} aria-expanded={false}>全体図</button>
+                  <button type="button" onClick={() => setMiniOpen((s) => ({ ...s, [scope]: true }))} aria-expanded={false}>全体図を表示</button>
                 ) : (
                   <>
                     <div ref={miniEl} className="minimap-map" aria-label="活動地域の全体図。クリックでメインの地図を移動" />
-                    <button type="button" className="minimap-collapse" onClick={() => setMiniOpen((s) => ({ ...s, [scope]: false }))} aria-label="全体図を折りたたむ" aria-expanded={true}>—</button>
+                    <button type="button" className="minimap-collapse" onClick={() => setMiniOpen((s) => ({ ...s, [scope]: false }))} aria-label="全体図を隠す" aria-expanded={true}>全体図を隠す</button>
                   </>
                 )}
               </div>
@@ -621,6 +619,8 @@ export function App() {
             </div>
             {!world ? <div className="loading">地形データを読み込んでいます…</div> : null}
             <div className="layerbar">
+              <button className="tog" onClick={() => devices.setHudOn(true)} disabled={!world}>HUD 表示</button>
+              <button className={`tog ${devices.healthOn ? 'on' : ''}`} aria-pressed={devices.healthOn} onClick={() => devices.setHealthOn((on) => !on)}>健康状態 {devices.healthOn ? 'ON' : 'OFF'}</button>
               <div className="basemap-switch" role="group" aria-label="地図の背景">
                 <button type="button" className={`tog ${baseMapMode === 'mono' ? 'on' : ''}`} aria-pressed={baseMapMode === 'mono'} onClick={() => setBaseMapMode('mono')}>白黒（詳細）</button>
                 <button type="button" className={`tog ${baseMapMode === 'color' ? 'on' : ''}`} aria-pressed={baseMapMode === 'color'} onClick={() => setBaseMapMode('color')}>カラー（広域）</button>
@@ -643,8 +643,7 @@ export function App() {
               aria-label="現在地（探査者の位置）へ移動"
               title="現在地（探査者の位置）"
               onClick={() => {
-                const p = backPos ?? pos ?? world?.base;
-                if (p) ctl.current?.fly(p.lat, p.lon, 15);
+                ctl.current?.followCurrent(world?.base);
               }}
             >
               ◎
@@ -673,11 +672,14 @@ export function App() {
         </section>
 
         <aside className="side">
+          <DestinationStatus info={destination} />
+          <PositionControls feed={positionFeed} planning={mode === 'plan'} online={online} />
           {notice ? <div className="note ok">{notice}</div> : null}
 
           {mode === 'plan' ? (
             <>
               <h2>ルート候補を比較</h2>
+              <button onClick={targetEditing.reset}>目的地を元の位置に戻す</button>
               <label className="fld">
                 <span>出発: 基地　→　目的地</span>
                 <select value={targetId} onChange={(e) => setTargetId(e.target.value)}>
@@ -760,7 +762,7 @@ export function App() {
               </label>
               <p className="muted small">圏外の間も記録は端末にたまり、通信が戻ると古い順に送られます。記録 {track.length} 点・未送信 {unsent} 件。</p>
               {offRoute ? <div className="note warn">予定ルートから {Math.round(deviation)} m 外れています。</div> : <p className="muted small">予定ルートからのずれ: {Math.round(deviation)} m</p>}
-              {simEnded && !restored ? <div className="note warn">周りの地形が予定と合いません。迷った可能性があります。</div> : null}
+              {simEnded && !restored ? <div className="note warn">{positionFeed.kind === 'simulation' ? '周りの地形が予定と合いません。迷った可能性があります。' : '位置情報ファイルの再生が終わりました。'}</div> : null}
               <button className="danger" onClick={() => { setPlaying(false); setMode('lost'); }} disabled={track.length < 3}>
                 迷った
               </button>
@@ -832,5 +834,6 @@ export function App() {
         </aside>
       </div>
     </div>
+    </>
   );
 }

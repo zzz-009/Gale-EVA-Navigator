@@ -6,6 +6,7 @@ import { CRS_MARS } from './lib/crsMars';
 import type { HeatImage } from './heatmap';
 import { hazardText, type HazardProperties, type HazardSettings } from './hazardText';
 import { BaseMap, type BaseMapMode } from './baseMap';
+import { ExplorerMarker } from './position/explorerMarker';
 
 export type LayerKey = 'hillshade' | 'slope' | 'contours' | 'hazard' | 'heat';
 export type Site = { id: string; name: string; lat: number; lon: number; note?: string };
@@ -34,7 +35,7 @@ export class MapController {
   private track = L.layerGroup();
   private back = L.layerGroup();
   private hints = L.layerGroup();
-  private explorer = L.layerGroup();
+  private readonly explorer: ExplorerMarker;
   private temp = L.layerGroup();
   private heat = L.layerGroup();
   private heatImage: L.ImageOverlay | null = null;
@@ -59,6 +60,7 @@ export class MapController {
       maxBoundsViscosity: 1,
     });
     this.map.fitBounds(bounds);
+    this.explorer = new ExplorerMarker(this.map);
 
     this.baseMap = new BaseMap(this.map);
 
@@ -132,7 +134,7 @@ export class MapController {
     }
     this.map.on('zoomend', () => this.syncContourLabels());
 
-    for (const g of [this.routes, this.track, this.back, this.hints, this.sites, this.explorer, this.temp]) g.addTo(this.map);
+    for (const g of [this.routes, this.track, this.back, this.hints, this.sites, this.temp]) g.addTo(this.map);
     L.control.zoom({ position: 'bottomright' }).addTo(this.map);
     L.control.scale({ position: 'bottomleft', metric: true, imperial: false }).addTo(this.map);
     this.map.on('click', (e) => onClick(e.latlng.lat, e.latlng.lng));
@@ -153,6 +155,7 @@ export class MapController {
   }
 
   destroy(): void {
+    this.explorer.destroy();
     this.map.remove();
   }
 
@@ -189,18 +192,23 @@ export class MapController {
     this.map.flyTo([lat, lon], zoom ?? this.map.getZoom(), { duration: 0.6 });
   }
 
-  setSites(base: Site, targets: Site[], landmarks: Landmark[], selectedTarget: string | null, onTarget: (id: string) => void): void {
+  setSites(base: Site, targets: Site[], landmarks: Landmark[], selectedTarget: string | null, onTarget: (id: string) => void, onDrag?: (id: string, p: { lat: number; lon: number }) => { lat: number; lon: number } | null): void {
     this.sites.clearLayers();
     L.marker([base.lat, base.lon], { icon: dot('#ffffff', 18) }).bindTooltip(base.name, { permanent: true, direction: 'top', className: 'lbl' }).addTo(this.sites);
     for (const t of targets) {
       const sel = t.id === selectedTarget;
-      L.marker([t.lat, t.lon], { icon: dot('#afa9ec', sel ? 18 : 13, sel ? '#ffffff' : '#0b1418') })
+      const marker = L.marker([t.lat, t.lon], { draggable: !!onDrag, icon: dot('#afa9ec', sel ? 18 : 13, sel ? '#ffffff' : '#0b1418') })
         .bindTooltip(t.name, { permanent: true, direction: 'top', className: 'lbl' })
         .on('click', (e) => {
           L.DomEvent.stopPropagation(e);
           onTarget(t.id);
         })
         .addTo(this.sites);
+      if (onDrag) marker.on('dragend', () => {
+        const p = marker.getLatLng();
+        const accepted = onDrag(t.id, { lat: p.lat, lon: p.lng });
+        marker.setLatLng(accepted ? [accepted.lat, accepted.lon] : [t.lat, t.lon]);
+      });
     }
     for (const l of landmarks) {
       L.marker([l.lat, l.lon], {
@@ -240,13 +248,9 @@ export class MapController {
     }
   }
 
-  setExplorer(pos: { lat: number; lon: number } | null, err_m: number, follow: boolean): void {
-    this.explorer.clearLayers();
-    if (!pos) return;
-    L.circle([pos.lat, pos.lon], { radius: circleRadius(err_m), color: '#378add', weight: 1, fillColor: '#378add', fillOpacity: 0.18, interactive: false }).addTo(this.explorer);
-    L.marker([pos.lat, pos.lon], { icon: dot('#378add', 16, '#ffffff'), interactive: false }).addTo(this.explorer);
-    if (follow && !this.map.getBounds().pad(-0.2).contains([pos.lat, pos.lon])) this.map.panTo([pos.lat, pos.lon]);
-  }
+  setExplorer(pos: { lat: number; lon: number } | null, err_m: number, heading = 0): void { this.explorer.update(pos, err_m, heading); }
+
+  followCurrent(fallback?: { lat: number; lon: number }): void { this.explorer.follow(fallback); }
 
   setTracBack(plan: TracBackPlan | null, from: { lat: number; lon: number } | null, next: number): void {
     this.back.clearLayers();

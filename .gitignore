@@ -9,3 +9,22 @@ dist/
 __pycache__/
 .vercel/
 .env*
+# リポジトリに含めない（ローカルには残す）: 検討メモ・他の課題文・旧TODO・発表資料
+ideas/
+20261114/
+presentation/
+docs/TODO_case11.md
+case1.txt
+case2.txt
+case3.txt
+case4.txt
+case5.txt
+case6.txt
+case7.txt
+case8.txt
+case9.txt
+case11.txt
+case12.txt
+case13.txt
+case14.txt
+case15.txt
