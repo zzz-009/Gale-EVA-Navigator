@@ -1,3 +1,4 @@
+import { downloadJson } from './measurementLog';
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import L from 'leaflet';
@@ -9,6 +10,7 @@ import { loadWorld, type World } from './world';
 import { loadSession, saveSession, type SavedSession } from './store';
 import { useBaseDeviceChannel } from './deviceChannel';
 
+vi.mock('./measurementLog', async (importOriginal) => ({ ...await importOriginal<typeof import('./measurementLog')>(), downloadJson: vi.fn() }));
 vi.mock('./world', () => ({ loadWorld: vi.fn() }));
 vi.mock('./store', () => ({ loadSession: vi.fn(), saveSession: vi.fn(), clearSession: vi.fn() }));
 vi.mock('./deviceChannel', () => ({ useBaseDeviceChannel: vi.fn(() => null) }));
@@ -88,6 +90,22 @@ it('places sites from either map, replans from the new base, and restores sites 
     await clickButton('このルートで出発（シミュレーション）');
     await settle(300);
     await settle(1000);
+    await clickButton('計測データを JSON で保存');
+    const firstExport = vi.mocked(downloadJson).mock.lastCall![0];
+    expect(firstExport.count).toBeGreaterThan(0);
+    expect(firstExport.records.every((record) => record.comm.online)).toBe(true);
+    expect(vi.mocked(downloadJson).mock.lastCall![1]).toMatch(/^gale-eva-measurements-sol\d+-\d{4}\.json$/);
+    const offlineToggle = [...container.querySelectorAll('label')].find((label) => label.textContent?.includes('通信遮断モード'))!.querySelector('input')!;
+    await act(async () => offlineToggle.click());
+    await settle(300);
+    await clickButton('計測データを JSON で保存');
+    const offlineExport = vi.mocked(downloadJson).mock.lastCall![0];
+    expect(offlineExport.records.slice(0, firstExport.count)).toEqual(firstExport.records);
+    expect(offlineExport.records.slice(firstExport.count).some((record) => !record.comm.online && record.comm.downlink_kbps === 0)).toBe(true);
+    await act(async () => offlineToggle.click());
+    await settle(100);
+    await clickButton('計測データを JSON で保存');
+    expect(vi.mocked(downloadJson).mock.lastCall![0].records.slice(0, offlineExport.count)).toEqual(offlineExport.records);
     const saved = vi.mocked(saveSession).mock.lastCall![0];
     expect(saved.base).toMatchObject(newBase);
     expect(saved.targets).toContainEqual(added);
@@ -101,6 +119,13 @@ it('places sites from either map, replans from the new base, and restores sites 
     expect(sites.mock.lastCall![0]).toMatchObject(newBase);
     expect(sites.mock.lastCall![1]).toContainEqual(added);
     expect(sites.mock.lastCall![3]).toBe(added.id);
+    const exportButton = [...container.querySelectorAll('button')].find((button) => button.textContent === '計測データを JSON で保存')!;
+    expect(exportButton.disabled).toBe(true);
+    await clickButton('計画に戻る');
+    await clickButton('このルートで出発（シミュレーション）');
+    await settle(200);
+    await clickButton('計測データを JSON で保存');
+    expect(vi.mocked(downloadJson).mock.lastCall![0].count).toBeLessThan(offlineExport.count);
   } finally {
     await act(async () => root.unmount());
     container.remove();

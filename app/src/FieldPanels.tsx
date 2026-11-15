@@ -3,13 +3,14 @@ import type { TrackPoint, Landmark, nearestBreadcrumb, buildTracBack, returnLimi
 import { fmtKm, fmtLatLon } from './panelFormat';
 type Mode = 'plan'|'traverse'|'lost'|'tracback';
 type Props = {
+ measurementCount:number; saveMeasurements:()=>void;
  mode:Mode; setMode:Dispatch<SetStateAction<Mode>>; restored:boolean; playing:boolean; setPlaying:Dispatch<SetStateAction<boolean>>; simEnded:boolean;
  speed:number; setSpeed:(speed:number)=>void; forcedOffline:boolean; setForcedOffline:(v:boolean)=>void;
  track:TrackPoint[]; unsent:number; offRoute:boolean; deviation:number; simulation:boolean; reset:()=>void; startTracBack:()=>void;
  lost:{nb:NonNullable<ReturnType<typeof nearestBreadcrumb>>;plan:ReturnType<typeof buildTracBack>;fix:TrackPoint|null;near:{l:Landmark;d:number}[]}|null;
  limit:ReturnType<typeof returnLimit>|null; pos:TrackPoint|null; o2:number; backIdx:number; backStep_m:number; nextManeuver:number; backProgress:number;
 };
-export function FieldPanels({mode,setMode,restored,playing,setPlaying,simEnded,speed,setSpeed,forcedOffline,setForcedOffline,track,unsent,offRoute,deviation,simulation,reset,startTracBack,lost,limit,pos,o2,backIdx,backStep_m,nextManeuver,backProgress}:Props) {
+export function FieldPanels({measurementCount,saveMeasurements,mode,setMode,restored,playing,setPlaying,simEnded,speed,setSpeed,forcedOffline,setForcedOffline,track,unsent,offRoute,deviation,simulation,reset,startTracBack,lost,limit,pos,o2,backIdx,backStep_m,nextManeuver,backProgress}:Props) {
  if(mode === 'plan') return null;
  return <section className="panel-card field-panel">          {mode === 'traverse' ? (
             <>
@@ -104,5 +105,8 @@ export function FieldPanels({mode,setMode,restored,playing,setPlaying,simEnded,s
               </label>
             </>
           ) : null}
+  <button onClick={saveMeasurements} disabled={measurementCount === 0}>計測データを JSON で保存</button>
+  <p className="muted small">位置・基地からの距離・通信の状態・健康状態（通信速度と健康はシミュレーション）。計測 {measurementCount} 件。</p>
+  <p className="muted small">再読み込みすると計測の記録は消えます。</p>
 </section>;
 }

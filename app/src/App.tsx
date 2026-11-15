@@ -1,3 +1,4 @@
+import { measurementFrom, exportDocument, downloadJson, type Measurement } from './measurementLog';
 import L from 'leaflet';
 import { OverviewPane, type OverviewHandle } from './OverviewPane';
 import { routeBounds, followSelection } from './rangeSelect';
@@ -100,6 +101,9 @@ export function App() {
   const [routes, setRoutes] = useState<Route[] | null>(null);
   const [preset, setPreset] = useState<RoutePreset>('safe');
   const [track, setTrack] = useState<TrackPoint[]>([]);
+  const measurements = useRef<Measurement[]>([]);
+  const measuredPoints = useRef(0);
+  const [measurementCount, setMeasurementCount] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(3);
   const [forcedOffline, setForcedOffline] = useState(false);
@@ -267,6 +271,25 @@ export function App() {
   const battery = Math.max(0, BATTERY_START_MIN - elapsedMin);
   const limit = lost ? returnLimit(Math.max(0, lost.plan.est_time_s + lost.approach_s - backElapsed), o2, battery) : null;
   const health = useMemo(() => simulateHealth(track, stats.elapsed_s + backElapsed, o2, battery / BATTERY_START_MIN * 100, limit?.level), [track, stats.elapsed_s, backElapsed, o2, battery, limit?.level]);
+
+  useEffect(() => {
+    if (!track.length) {
+      measurements.current = [];
+      measuredPoints.current = 0;
+      setMeasurementCount(0);
+      return;
+    }
+    // Persisted tracks have no historical communication/health samples. Do not invent them.
+    if (restored) { measuredPoints.current = track.length; return; }
+    if (!base) return;
+    for (let i = measuredPoints.current; i < track.length; i++) {
+      const point = track[i];
+      const source = positionFeed.kind === 'simulation' ? 'simulation' : point.src === 'fix' ? 'satellite' : 'dead_reckoning';
+      measurements.current.push(measurementFrom(point, base, online, health, source));
+    }
+    measuredPoints.current = track.length;
+    setMeasurementCount(measurements.current.length);
+  }, [track, base, online, health, restored, positionFeed.kind]);
 
   useEffect(() => {
     if (mode !== 'tracback') return;
@@ -486,6 +509,13 @@ export function App() {
 
   const currentMs = startMs.current + (stats.elapsed_s + backElapsed) * 1000;
   const clock = base ? stamp(currentMs, base.lon) : null;
+  const saveMeasurements = (): void => {
+    if (!world || !base || !clock || !measurements.current.length) return;
+    downloadJson(exportDocument(measurements.current, {
+      exported_utc: new Date().toISOString(), terrain: `HiRISE DTM ${world.region.source.product}`,
+      base, health_display_on: devices.healthOn,
+    }), `gale-eva-measurements-sol${clock.sol}-${clock.lmst.slice(0, 5).replace(':', '')}.json`);
+  };
   const weatherWarning = forecast ? dustWarning(forecast) : null;
   const hudState: HudState = { ...field, health, healthOn: devices.healthOn, overviewOn: !miniCollapsed, online, source: backPos ? 'dead_reckoning' : positionFeed.fix?.source ?? 'simulation', destination,
     warning: fieldWarning(destination?.offRoute ?? false, weatherWarning, limit, health), baseMapMode, route, track, targets, base: base ?? undefined };
@@ -620,7 +650,7 @@ export function App() {
         </section>
 
         <div className="panel-grid">
-          <FieldPanels mode={mode} setMode={setMode} restored={restored} playing={playing} setPlaying={setPlaying} simEnded={simEnded} speed={speed} setSpeed={setSpeed} forcedOffline={forcedOffline} setForcedOffline={setForcedOffline} track={track} unsent={unsent} offRoute={offRoute} deviation={deviation} simulation={positionFeed.kind === 'simulation'} reset={reset} startTracBack={startTracBack} lost={lost} limit={limit} pos={pos} o2={o2} backIdx={backIdx} backStep_m={backStep_m} nextManeuver={nextManeuver} backProgress={backProgress} />
+          <FieldPanels measurementCount={measurementCount} saveMeasurements={saveMeasurements} mode={mode} setMode={setMode} restored={restored} playing={playing} setPlaying={setPlaying} simEnded={simEnded} speed={speed} setSpeed={setSpeed} forcedOffline={forcedOffline} setForcedOffline={setForcedOffline} track={track} unsent={unsent} offRoute={offRoute} deviation={deviation} simulation={positionFeed.kind === 'simulation'} reset={reset} startTracBack={startTracBack} lost={lost} limit={limit} pos={pos} o2={o2} backIdx={backIdx} backStep_m={backStep_m} nextManeuver={nextManeuver} backProgress={backProgress} />
           <section className="panel-card"><DestinationStatus info={destination} /></section>
           {mode === 'plan' ? <PlanPanels targets={targets} targetId={targetId} setTargetId={setTargetId} target={target} routes={routes} route={route} setPreset={setPreset} speed={speed} setSpeed={setSpeed} depart={depart} resetTargets={targetEditing.reset} jsonSource={positionFeed.kind === 'json'} resetBase={() => { setBaseOverride(null); setNotice('基地を元の位置に戻しました。'); }} baseMoved={baseOverride !== null} /> : null}
           <section className="panel-card"><PositionControls feed={positionFeed} planning={mode === 'plan'} online={online} /></section>
