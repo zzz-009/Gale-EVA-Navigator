@@ -68,6 +68,7 @@ export class MapController {
     const heatPane = this.map.createPane('heat');
     heatPane.style.zIndex = '350';
     heatPane.style.pointerEvents = 'none';
+    const contourRenderer = L.canvas();
     this.overlays = {
       heat: this.heat,
       hillshade: L.imageOverlay('/data/hillshade.png', bounds, { opacity: 0.75, pane: 'terrain' }),
@@ -75,6 +76,7 @@ export class MapController {
       contours: L.geoJSON(contours, {
         interactive: false,
         style: (f) => ({
+          renderer: contourRenderer,
           color: '#e8e2d6',
           weight: f?.properties?.index ? 1.6 : 0.7,
           opacity: f?.properties?.index ? 0.65 : 0.3,

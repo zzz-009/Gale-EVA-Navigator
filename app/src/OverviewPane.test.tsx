@@ -7,7 +7,7 @@ import type { World } from './world';
 
 const emptyFeatures: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] };
 const world = {
-  region: { south: -4.7, north: -4.4, west: 137.2, east: 137.7, slope_max_deg: 20, slope_limited_deg: 15, cell_m: 10 },
+  region: { south: -5.4, north: -4.4, west: 137.2, east: 137.7, slope_max_deg: 20, slope_limited_deg: 15, cell_m: 10 },
   contours: emptyFeatures,
   hazards: emptyFeatures,
 } as World;
@@ -65,6 +65,7 @@ it.each([true, false])('keeps the same map and selected range across hiding and 
     expect(map.getSize()).toEqual(L.point(600, 450));
     const regionBounds = L.latLngBounds([world.region.south, world.region.west], [world.region.north, world.region.east]);
     expect(map.getZoom()).toBe(map.getBoundsZoom(regionBounds));
+    expect(map.getBounds().contains(regionBounds)).toBe(true);
     expect(container.querySelectorAll('.leaflet-range-pane path')).toHaveLength(3);
     const rectangles: L.Rectangle[] = [];
     map.eachLayer((layer) => {
