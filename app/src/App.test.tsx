@@ -6,6 +6,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { cellLatLon, type Grid } from '@core';
 import { App } from './App';
 import { MapController } from './mapController';
+import { routeBounds } from './rangeSelect';
 import { loadWorld, type World } from './world';
 import { loadSession, saveSession, type SavedSession } from './store';
 import { useBaseDeviceChannel } from './deviceChannel';
@@ -69,6 +70,14 @@ it('places sites from either map, replans from the new base, and restores sites 
     const controllers = [...new Set(sites.mock.contexts as MapController[])];
     const operation = controllers.find((controller) => !controller.map.getContainer().closest('#dashboard-overview'))!;
     const overview = controllers.find((controller) => controller !== operation)!;
+    const initialBounds = routeBounds(routeCalls.mock.lastCall![0][0].coords);
+    expect(operation.map.getZoom()).toBeCloseTo(operation.map.getBoundsZoom(initialBounds), 8);
+    expect(operation.map.latLngToContainerPoint(initialBounds.getCenter()).distanceTo(operation.map.getSize().divideBy(2))).toBeLessThanOrEqual(1);
+    await act(async () => operation.map.setZoom(16, { animate: false }));
+    operation.resize();
+    await clickButton('表示画面を隠す');
+    await clickButton('表示画面を表示');
+    expect(operation.map.getZoom()).toBe(16);
     const newBase = cellLatLon(world.grid, 15, 15);
     await act(async () => operation.map.fire('click', { latlng: L.latLng(newBase.lat, newBase.lon) }));
     await clickButton('ここに基地を置く');
@@ -76,6 +85,8 @@ it('places sites from either map, replans from the new base, and restores sites 
     expect(fetchFeed).toHaveBeenCalledTimes(1);
     expect(sites.mock.calls.slice(-2).every(([base]) => base.lat === newBase.lat && base.lon === newBase.lon)).toBe(true);
     expect(routeCalls.mock.lastCall![0][0].coords[0]).toEqual([newBase.lat, newBase.lon]);
+    const replannedBounds = routeBounds(routeCalls.mock.lastCall![0][0].coords);
+    expect(operation.map.getZoom()).toBeCloseTo(operation.map.getBoundsZoom(replannedBounds), 8);
 
     const destination = cellLatLon(world.grid, 45, 45);
     await act(async () => overview.map.fire('click', { latlng: L.latLng(destination.lat, destination.lon) }));
@@ -88,8 +99,10 @@ it('places sites from either map, replans from the new base, and restores sites 
     expect(useBaseDeviceChannel).toHaveBeenLastCalledWith(expect.objectContaining({ base: expect.objectContaining(newBase) }), expect.anything());
 
     await clickButton('このルートで出発（シミュレーション）');
+    await act(async () => operation.map.setZoom(16, { animate: false }));
     await settle(300);
     await settle(1000);
+    expect(operation.map.getZoom()).toBe(16);
     await clickButton('計測データを JSON で保存');
     const firstExport = vi.mocked(downloadJson).mock.lastCall![0];
     expect(firstExport.count).toBeGreaterThan(0);
@@ -121,7 +134,11 @@ it('places sites from either map, replans from the new base, and restores sites 
     expect(sites.mock.lastCall![3]).toBe(added.id);
     const exportButton = [...container.querySelectorAll('button')].find((button) => button.textContent === '計測データを JSON で保存')!;
     expect(exportButton.disabled).toBe(true);
+    const restoredOperation = [...new Set(sites.mock.contexts as MapController[])].reverse().find((controller) => !controller.map.getContainer().closest('#dashboard-overview'))!;
+    await act(async () => restoredOperation.map.setZoom(16, { animate: false }));
     await clickButton('計画に戻る');
+    const resetBounds = routeBounds(routeCalls.mock.lastCall![0][0].coords);
+    expect(restoredOperation.map.getZoom()).toBeCloseTo(restoredOperation.map.getBoundsZoom(resetBounds), 8);
     await clickButton('このルートで出発（シミュレーション）');
     await settle(200);
     await clickButton('計測データを JSON で保存');

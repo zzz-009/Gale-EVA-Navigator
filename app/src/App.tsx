@@ -329,8 +329,11 @@ export function App() {
 
   // Route selection establishes the range; field tracking only translates it.
   useEffect(() => {
-    if (route?.coords.length) setSelection(routeBounds(route.coords));
-    else if (world) setSelection(L.latLngBounds([world.region.south, world.region.west], [world.region.north, world.region.east]));
+    if (route?.coords.length) {
+      const bounds = routeBounds(route.coords);
+      ctl.current?.setSelection(bounds, false);
+      setSelection(bounds);
+    } else if (world) setSelection(L.latLngBounds([world.region.south, world.region.west], [world.region.north, world.region.east]));
   }, [route, world]);
   useEffect(() => {
     const p = backPos ?? pos;
@@ -495,6 +498,11 @@ export function App() {
     setMode('tracback');
   };
   const reset = (): void => {
+    if (route?.coords.length) {
+      const bounds = routeBounds(route.coords);
+      ctl.current?.setSelection(bounds, false);
+      setSelection(bounds);
+    }
     void clearSession();
     lastSaved.current = null;
     setSaveState('idle');
